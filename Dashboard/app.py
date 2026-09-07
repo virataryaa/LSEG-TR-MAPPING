@@ -44,13 +44,6 @@ st.markdown("""
 <style>
 :root, .stApp { color-scheme: light !important; }
 .stApp { background-color: #ffffff !important; }
-.kpi-card {
-    background: #f7f8fa; border-radius: 6px; padding: 8px 12px;
-    border: 1px solid #e0e0e0; text-align: center;
-}
-.kpi-label { color: #666; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
-.kpi-value { color: #111; font-size: 1.15rem; font-weight: 600; margin-top: 2px; }
-.kpi-sub { color: #888; font-size: 0.66rem; margin-top: 1px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -129,12 +122,23 @@ def fmt_price(short: str, val: float) -> str:
     return f'{val:,.{d}f}'
 
 
-def kpi_card(label: str, value: str, sub: str = '') -> str:
-    return f"""<div class="kpi-card">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value">{value}</div>
-        <div class="kpi-sub">{sub}</div>
-    </div>"""
+def kpi_strip(items: list) -> str:
+    """Super-compact one-line KPI row — replaces 5 separate bordered cards with
+    a single thin strip (label + colored value pairs inline). items: list of
+    (label, value_float, display_str)."""
+    def _color(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return '#888'
+        return '#1b8a3d' if v > 0 else '#c62828' if v < 0 else '#555'
+
+    cells = ''.join(
+        f'<span style="margin-right:20px;white-space:nowrap;">'
+        f'<span style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;">{label}</span> '
+        f'<span style="font-size:0.88rem;font-weight:700;color:{_color(v)};">{disp}</span></span>'
+        for label, v, disp in items
+    )
+    return (f'<div style="padding:6px 12px;background:#f7f8fa;border:1px solid #e0e0e0;'
+           f'border-radius:6px;margin-bottom:8px;">{cells}</div>')
 
 
 def section_header(title: str, subtitle: str = '') -> str:
@@ -308,28 +312,52 @@ def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str =
     """
 
 
-def date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
-    """Sticky-controls-row equivalent: radio for quick ranges + custom picker."""
+def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
+    """Compact date-range control: radio for quick ranges + custom two-date
+    picker. Returns (start_ts, end_ts) rather than a filtered frame so the same
+    window can be applied to more than one DataFrame (e.g. price + futures)
+    without desyncing them.
+
+    st.date_input with a range `value` returns a SINGLE date (not a 2-tuple)
+    the moment the user has picked only the first end of the range — unpacking
+    that as `start, end = ...` crashes with ValueError until the second date is
+    picked. Handled defensively below instead of assuming a 2-tuple."""
     c1, c2 = st.columns([2, 2])
     with c1:
         choice = st.radio(
             'Date range', ['1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
             index=2, horizontal=True, key=f'{key_prefix}_range',
         )
-    max_date = df.index.max()
+    max_date = pd.Timestamp(df.index.max())
+    min_date = pd.Timestamp(df.index.min())
     if choice == 'Custom':
         with c2:
-            min_date = df.index.min()
-            start, end = st.date_input(
+            picked = st.date_input(
                 'Custom range', value=(max_date - pd.Timedelta(days=365), max_date),
                 min_value=min_date, max_value=max_date, key=f'{key_prefix}_custom',
             )
-        return df.loc[(df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))]
-    years_map = {'1Y': 1, '3Y': 3, '5Y': 5, '10Y': 10}
+        if isinstance(picked, (tuple, list)) and len(picked) == 2:
+            start, end = picked
+        else:
+            # Only one end picked so far — hold the other at the current bound
+            # instead of crashing; the chart re-renders once both are chosen.
+            single = picked[0] if isinstance(picked, (tuple, list)) else picked
+            start, end = single, max_date
+        return pd.Timestamp(start), pd.Timestamp(end)
     if choice == 'All':
-        return df
-    start = max_date - pd.DateOffset(years=years_map[choice])
-    return df.loc[df.index >= start]
+        return min_date, max_date
+    years_map = {'1Y': 1, '3Y': 3, '5Y': 5, '10Y': 10}
+    return max_date - pd.DateOffset(years=years_map[choice]), max_date
+
+
+def apply_range(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    return df.loc[(df.index >= start) & (df.index <= end)]
+
+
+def date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """Single-DataFrame convenience wrapper around get_date_range()+apply_range()."""
+    start, end = get_date_range(df, key_prefix)
+    return apply_range(df, start, end)
 
 
 def add_tuesday_lines(fig: go.Figure, idx: pd.DatetimeIndex, row=None, col=None):
@@ -655,21 +683,27 @@ for i, short in enumerate(SHORTS):
 
         # KPI row matches the original's 5 composites (ST/MT/LT/All/WAll, x100
         # int-style display); futures price moved to the header above instead
-        # of a 6th card, to match the original's exact KPI set.
-        kc1, kc2, kc3, kc4, kc5 = st.columns(5)
-        kc1.markdown(kpi_card('ST', f"{last['ST_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
-        kc2.markdown(kpi_card('MT', f"{last['MT_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
-        kc3.markdown(kpi_card('LT', f"{last['LT_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
-        kc4.markdown(kpi_card('All', f"{last['All_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
-        kc5.markdown(kpi_card('WAll', f"{last['WAll_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
-        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+        # of a 6th card. Rendered as one compact strip instead of 5 bordered
+        # cards to cut down the vertical space it takes.
+        st.markdown(kpi_strip([
+            ('ST',   last['ST_Avg'],   f"{last['ST_Avg'] * 100:+.0f}"),
+            ('MT',   last['MT_Avg'],   f"{last['MT_Avg'] * 100:+.0f}"),
+            ('LT',   last['LT_Avg'],   f"{last['LT_Avg'] * 100:+.0f}"),
+            ('All',  last['All_Avg'],  f"{last['All_Avg'] * 100:+.0f}"),
+            ('WAll', last['WAll_Avg'], f"{last['WAll_Avg'] * 100:+.0f}"),
+        ]), unsafe_allow_html=True)
 
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
 
         with sub_charts:
             show_tues = st.checkbox('Show Tuesday lines', value=False, key=f'{short}_tues')
-            price_ranged = date_range_filter(price, f'{short}_price')
-            st.plotly_chart(chart_price(short, price_ranged, fut, show_tues),
+            # Same window applied to both price (GSCI) and fut (futures) so the
+            # secondary-axis GSCI line doesn't fall out of sync with the
+            # date-filtered primary line.
+            rng_start, rng_end = get_date_range(price, f'{short}_price')
+            price_ranged = apply_range(price, rng_start, rng_end)
+            fut_ranged = apply_range(fut, rng_start, rng_end)
+            st.plotly_chart(chart_price(short, price_ranged, fut_ranged, show_tues),
                             use_container_width=True, key=f'{short}_pricechart')
 
             composite = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
