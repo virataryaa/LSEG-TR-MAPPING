@@ -19,8 +19,19 @@ DATA_DIR = BASE_DIR / 'Database'
 # Reuse the exact same 144-indicator calculate_indicators() from Code/ for the
 # Monte Carlo feature instead of duplicating that logic here — avoids any risk
 # of the dashboard's indicator math drifting out of sync with the ingest script.
+# Guarded: Code/tr_mapping_fetch.py hard-imports pandas_ta, which pulls in numba
+# — numba has no published wheel for some Python versions Streamlit Cloud may
+# run, which broke the whole app's deploy when this was an unguarded import.
+# requirements.txt intentionally does NOT list pandas_ta for that reason; the
+# Monte Carlo feature degrades to "unavailable" instead of crashing the app
+# when the import fails.
 sys.path.insert(0, str(BASE_DIR / 'Code'))
-from tr_mapping_fetch import calculate_indicators  # noqa: E402
+try:
+    from tr_mapping_fetch import calculate_indicators
+    MC_AVAILABLE = True
+except ImportError:
+    calculate_indicators = None
+    MC_AVAILABLE = False
 
 st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 
@@ -525,6 +536,8 @@ def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: 
     set on each, and return per-horizon-day percentile bands (p10/p25/p50/p75/
     p90) for ST/MT/LT/All/WAll. `last_date_str` is part of the cache key purely
     so the cache invalidates once new data lands — it isn't otherwise used."""
+    if not MC_AVAILABLE:
+        return pd.DataFrame()
     price, _, _, _ = get_instrument_data(short, source)
     if price.empty or len(price) < 300:
         return pd.DataFrame()
@@ -920,10 +933,13 @@ for i, short in enumerate(SHORTS):
 
                 show_mc = st.checkbox(
                     'Show Monte Carlo bands', value=False, key=f'{short}_mc_toggle',
-                    help='Bootstraps N random 10-day price paths from recent daily returns and '
+                    disabled=not MC_AVAILABLE,
+                    help=('Temporarily unavailable in this deployment (missing pandas_ta dependency).'
+                         if not MC_AVAILABLE else
+                         'Bootstraps N random 10-day price paths from recent daily returns and '
                          'recomputes the full indicator set on each — gives a probabilistic p10-p90 '
                          '/ p25-p75 range instead of the 3 deterministic UP/DOWN/UNCH scenarios. Slow '
-                         'on first run (recomputes 144 indicators x N times); cached after that.',
+                         'on first run (recomputes 144 indicators x N times); cached after that.'),
                 )
                 mc_bands = None
                 if show_mc and run_choice == run_dates[0]:
