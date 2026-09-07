@@ -41,8 +41,6 @@ MKT_COLOR = {
     'RC':  '#6D4C41',
 }
 
-PRICE_DECIMALS = {'KC': 2, 'CT': 2, 'SB': 2, 'CC': 0, 'OJ': 2, 'LCC': 0, 'LSU': 1, 'RC': 0}
-
 INSTRUMENT_LABELS = {
     'KC': 'Coffee', 'CT': 'Cotton', 'SB': 'Sugar', 'CC': 'Cocoa', 'OJ': 'Orange Juice',
     'LCC': 'London Cocoa', 'LSU': 'London Sugar', 'RC': 'Robusta Coffee',
@@ -179,10 +177,11 @@ def get_instrument_data(short: str, source: str = 'GSCI'):
 
 
 def fmt_price(short: str, val: float) -> str:
+    # Fixed 1 decimal everywhere — was per-instrument (PRICE_DECIMALS: 0/1/2),
+    # now a single consistent precision across the whole dashboard.
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return 'n/a'
-    d = PRICE_DECIMALS.get(short, 2)
-    return f'{val:,.{d}f}'
+    return f'{val:,.1f}'
 
 
 def kpi_strip(items: list) -> str:
@@ -246,7 +245,7 @@ def _fmt_cell(val, is_numeric: bool, is_signed: bool, decimals: int, num_fmt: st
     return str(val)
 
 
-def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f}', decimals: int = 2) -> str:
+def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.1f}', decimals: int = 1) -> str:
     """Renders a DataFrame as a fully inline-styled HTML table (no external CSS
     classes) — bordered header, zebra striping, right-aligned numerics, and
     green/red coloring on columns listed in signed_cols. Every numeric column
@@ -301,7 +300,7 @@ def _proj_sig_cell(v, bold: bool = False) -> str:
     color = '#1b8a3d' if val > 0 else '#c62828' if val < 0 else '#555'
     weight = '700' if bold else '500'
     return (f'<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;'
-            f'color:{color};font-weight:{weight};border-bottom:1px solid #f0f0f0;">{val * 100:+.0f}</td>')
+            f'color:{color};font-weight:{weight};border-bottom:1px solid #f0f0f0;">{val * 100:+.1f}</td>')
 
 
 def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str = None) -> str:
@@ -312,7 +311,7 @@ def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str =
     if sim_sel.empty:
         return '<div style="color:#888;font-size:0.82rem;">No simulation data.</div>'
 
-    decimals = PRICE_DECIMALS.get(short, 2)
+    decimals = 1  # fixed everywhere — was per-instrument (PRICE_DECIMALS)
     s = sim_sel.set_index('Horizon_Day').sort_index()
     head_price = float(s['price_unch'].iloc[0])
     label = futures_name or short
@@ -601,7 +600,7 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
         prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
         y_vals = [last_sig_val] + [_safe_round(v, scale=100) for v in sim_sel[col]]
         x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
-        p_labels = [''] + [('' if p is None or (isinstance(p, float) and np.isnan(p)) else f'{p:,.2f}') for p in prices]
+        p_labels = [''] + [('' if p is None or (isinstance(p, float) and np.isnan(p)) else f'{p:,.1f}') for p in prices]
         fig.add_trace(go.Scatter(
             x=x_vals, y=y_vals, name=name, mode='lines+markers+text',
             line=dict(color=clr, width=1.8, dash=dash), marker=dict(size=6, color=clr),
@@ -704,20 +703,23 @@ def overview_row(short: str, source: str) -> dict:
     chg_t1 = all_v - t1_val
     chg_t2 = all_v - t2_val
 
+    # x100 scale, 1 decimal — matches the KPI strip/projection table/charts
+    # elsewhere in the dashboard (was raw -1..1 with 3 decimals, the one place
+    # that didn't match everything else's display convention).
     return {
         'Commodity': short,
         'Label': INSTRUMENT_LABELS.get(short, short),
         'Futures Price': fmt_price(short, fut_last),
-        'ST_Avg': round(last['ST_Avg'], 3),
-        'MT_Avg': round(last['MT_Avg'], 3),
-        'LT_Avg': round(last['LT_Avg'], 3),
-        'All_Avg': round(last['All_Avg'], 3),
-        'WAll_Avg': round(last['WAll_Avg'], 3),
-        'Δ 1d': round(chg1d, 3),
-        'Δ 5d': round(chg5d, 3),
-        'Δ 10d': round(chg10d, 3),
-        'Δ Tue': round(chg_t1, 3),
-        'Δ 2nd Tue': round(chg_t2, 3),
+        'ST_Avg': round(last['ST_Avg'] * 100, 1),
+        'MT_Avg': round(last['MT_Avg'] * 100, 1),
+        'LT_Avg': round(last['LT_Avg'] * 100, 1),
+        'All_Avg': round(last['All_Avg'] * 100, 1),
+        'WAll_Avg': round(last['WAll_Avg'] * 100, 1),
+        'Δ 1d': round(chg1d * 100, 1),
+        'Δ 5d': round(chg5d * 100, 1),
+        'Δ 10d': round(chg10d * 100, 1),
+        'Δ Tue': round(chg_t1 * 100, 1),
+        'Δ 2nd Tue': round(chg_t2 * 100, 1),
         'As of': last.name.date().isoformat(),
     }
 
@@ -847,11 +849,11 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
         # of a 6th card. Rendered as one compact strip instead of 5 bordered
         # cards to cut down the vertical space it takes.
         st.markdown(kpi_strip([
-            ('ST',   last['ST_Avg'],   f"{last['ST_Avg'] * 100:+.0f}"),
-            ('MT',   last['MT_Avg'],   f"{last['MT_Avg'] * 100:+.0f}"),
-            ('LT',   last['LT_Avg'],   f"{last['LT_Avg'] * 100:+.0f}"),
-            ('All',  last['All_Avg'],  f"{last['All_Avg'] * 100:+.0f}"),
-            ('WAll', last['WAll_Avg'], f"{last['WAll_Avg'] * 100:+.0f}"),
+            ('ST',   last['ST_Avg'],   f"{last['ST_Avg'] * 100:+.1f}"),
+            ('MT',   last['MT_Avg'],   f"{last['MT_Avg'] * 100:+.1f}"),
+            ('LT',   last['LT_Avg'],   f"{last['LT_Avg'] * 100:+.1f}"),
+            ('All',  last['All_Avg'],  f"{last['All_Avg'] * 100:+.1f}"),
+            ('WAll', last['WAll_Avg'], f"{last['WAll_Avg'] * 100:+.1f}"),
         ]), unsafe_allow_html=True)
 
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
@@ -925,6 +927,6 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                 actual_tbl = sim_sel[['Horizon_Date', 'Horizon_Day', 'Actual_Close']].copy()
                 actual_tbl['Horizon_Date'] = actual_tbl['Horizon_Date'].dt.date
                 st.markdown(
-                    html_table(actual_tbl, decimals=PRICE_DECIMALS.get(short, 2)),
+                    html_table(actual_tbl, decimals=1),
                     unsafe_allow_html=True,
                 )
