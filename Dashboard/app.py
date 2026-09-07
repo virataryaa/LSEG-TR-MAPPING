@@ -4,6 +4,7 @@ Dash app (Hardminer architecture: Parquet data, Streamlit dashboard, GitHub repo
 """
 
 import pathlib
+import sys
 
 import numpy as np
 import pandas as pd
@@ -14,6 +15,12 @@ import streamlit as st
 
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / 'Database'
+
+# Reuse the exact same 144-indicator calculate_indicators() from Code/ for the
+# Monte Carlo feature instead of duplicating that logic here — avoids any risk
+# of the dashboard's indicator math drifting out of sync with the ingest script.
+sys.path.insert(0, str(BASE_DIR / 'Code'))
+from tr_mapping_fetch import calculate_indicators  # noqa: E402
 
 st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 
@@ -497,8 +504,65 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
     return fig
 
 
+# ── Monte Carlo signal bands (on-demand, dashboard-side) ─────────────────────
+#
+# The 3-scenario UP/DOWN/UNCH fan (build_simulation() in Code/) is deterministic
+# — the same vol% move compounded every day for 10 days, an extreme stress path
+# rather than a likely-range estimate. A real Monte Carlo needs N random paths,
+# each with the FULL 144-indicator set recomputed on it — calculate_indicators()
+# benchmarks at ~2.3s/call, so N paths costs ~N*2.3s. Running this for every
+# instrument/source in the daily ingest batch (12 combos) was rejected as too
+# expensive (N=50 -> ~23 extra minutes on the scheduled job); instead this runs
+# lazily in the dashboard, only when a viewer explicitly asks for it, cached so
+# the first viewer per (instrument, source, day, N) pays the cost and everyone
+# else after that gets it instantly until the data changes.
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: int, seed: int = 42) -> pd.DataFrame:
+    """Bootstrap N random 10-day price paths from the instrument's own recent
+    daily-return distribution (not a Normal-distribution assumption — real
+    historical returns preserve fat tails/skew), recompute the full indicator
+    set on each, and return per-horizon-day percentile bands (p10/p25/p50/p75/
+    p90) for ST/MT/LT/All/WAll. `last_date_str` is part of the cache key purely
+    so the cache invalidates once new data lands — it isn't otherwise used."""
+    price, _, _, _ = get_instrument_data(short, source)
+    if price.empty or len(price) < 300:
+        return pd.DataFrame()
+
+    horizon = 10
+    base = price.tail(1500).copy()
+    hist_returns = base['CLOSE'].pct_change().dropna().tail(500).to_numpy()
+    if len(hist_returns) < 50:
+        return pd.DataFrame()
+
+    rng = np.random.default_rng(seed)
+    last_price = float(base['CLOSE'].iloc[-1])
+    last_date = base.index.max()
+    future_dates = pd.bdate_range(last_date + pd.Timedelta(days=1), periods=horizon)
+
+    composites = ['ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg']
+    samples = {c: np.empty((n_paths, horizon)) for c in composites}
+
+    for i in range(n_paths):
+        draws = rng.choice(hist_returns, size=horizon, replace=True)
+        sim_prices = last_price * np.cumprod(1 + draws)
+        ext = pd.DataFrame({'CLOSE': sim_prices}, index=future_dates)
+        combined = pd.concat([base[['CLOSE']], ext])
+        ind_sim = calculate_indicators(combined)
+        tail = ind_sim.tail(horizon)
+        for c in composites:
+            samples[c][i, :] = tail[c].to_numpy()
+
+    bands = pd.DataFrame({'Horizon_Date': future_dates, 'Horizon_Day': range(1, horizon + 1)})
+    for c in composites:
+        prefix = c.replace('_Avg', '')
+        for pct, label in [(10, 'p10'), (25, 'p25'), (50, 'p50'), (75, 'p75'), (90, 'p90')]:
+            bands[f'{prefix}_{label}'] = np.percentile(samples[c], pct, axis=0)
+    return bands
+
+
 def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
-                     ind: pd.DataFrame = None):
+                     ind: pd.DataFrame = None, mc_bands: pd.DataFrame = None):
     """Historical trailing signal (last 7 actual days) feeding into a 3-scenario
     10-day fan, with price labels at each node — matches the original Dash
     chart_projection() (single chart, not a 2-row subplot; price shown as text
@@ -526,6 +590,22 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
         last_sig_val = 0
 
     fig = go.Figure()
+
+    # Monte Carlo percentile bands — drawn first so the deterministic scenario
+    # lines and the Actual line render on top of them.
+    if mc_bands is not None and not mc_bands.empty and signal_col in ('ST', 'MT', 'LT', 'All', 'WAll'):
+        mc = mc_bands
+        p10, p25, p50, p75, p90 = (mc[f'{signal_col}_{p}'] * 100 for p in ('p10', 'p25', 'p50', 'p75', 'p90'))
+        x_mc = mc['Horizon_Date']
+        fig.add_trace(go.Scatter(x=x_mc, y=p90, line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p10, fill='tonexty', fillcolor='rgba(120,120,120,0.15)',
+                                 line=dict(width=0), name='MC 10-90%', hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p75, line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p25, fill='tonexty', fillcolor='rgba(90,90,90,0.28)',
+                                 line=dict(width=0), name='MC 25-75%', hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p50, name='MC median', mode='lines',
+                                 line=dict(color='#616161', width=1.4, dash='dot')))
+
     if not hist_sig.empty:
         fig.add_trace(go.Scatter(x=hist_sig.index, y=hist_sig[sig_col] * 100, name='Actual',
                                  line=dict(color=color, width=2)))
@@ -837,9 +917,29 @@ for i, short in enumerate(SHORTS):
                 run_choice = st.selectbox('Run date', run_dates, format_func=lambda d: pd.Timestamp(d).date().isoformat(),
                                           key=f'{short}_rundate')
                 sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
+
+                show_mc = st.checkbox(
+                    'Show Monte Carlo bands', value=False, key=f'{short}_mc_toggle',
+                    help='Bootstraps N random 10-day price paths from recent daily returns and '
+                         'recomputes the full indicator set on each — gives a probabilistic p10-p90 '
+                         '/ p25-p75 range instead of the 3 deterministic UP/DOWN/UNCH scenarios. Slow '
+                         'on first run (recomputes 144 indicators x N times); cached after that.',
+                )
+                mc_bands = None
+                if show_mc and run_choice == run_dates[0]:
+                    n_paths = st.select_slider('Paths (N)', options=[30, 50, 100], value=50, key=f'{short}_mc_n')
+                    with st.spinner(f'Running {n_paths} Monte Carlo paths for {short}/{eff} '
+                                    f'(~{n_paths * 2.3:.0f}s on first run)…'):
+                        last_date_str = ind.index.max().isoformat()
+                        mc_bands = get_monte_carlo_bands(short, eff, last_date_str, n_paths)
+                    if mc_bands.empty:
+                        st.warning('Not enough history to run Monte Carlo for this instrument.')
+                elif show_mc:
+                    st.caption('Monte Carlo bands are only available for the latest run date.')
+
                 col_chart, col_table = st.columns([7, 5])
                 with col_chart:
-                    st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind),
+                    st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
                                     width='stretch', key=f'{short}_projchart')
                 with col_table:
                     st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)

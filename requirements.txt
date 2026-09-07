@@ -3,3 +3,4 @@ pandas
 numpy
 pyarrow
 plotly
+pandas_ta
