@@ -47,7 +47,10 @@ INSTRUMENT_LABELS = {
     'KC': 'Coffee', 'CT': 'Cotton', 'SB': 'Sugar', 'CC': 'Cocoa', 'OJ': 'Orange Juice',
     'LCC': 'London Cocoa', 'LSU': 'London Sugar', 'RC': 'Robusta Coffee',
 }
-SHORTS = ['KC', 'CT', 'SB', 'CC', 'OJ', 'LCC', 'LSU', 'RC']
+# Paired by commodity family (NY/US contract next to its London counterpart)
+# rather than alphabetically: KC/RC both coffee, CC/LCC both cocoa, SB/LSU
+# both sugar, then the two standalones.
+SHORTS = ['KC', 'RC', 'CC', 'LCC', 'SB', 'LSU', 'CT', 'OJ']
 
 # Rollex (this desk's own continuous roll-adjusted futures price) covers
 # KC/CT/SB/CC/LCC/LSU/RC — no OJ. GSCI_SHORTS is the opposite gap: LCC/LSU/RC
@@ -746,9 +749,10 @@ else:
 last_update = ind_all.loc[ind_all['Source'] == 'GSCI', 'Date'].max()
 st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
 
-tab_names = ['Overview', 'All Projections', 'All Signals'] + [
-    f'{s} — {INSTRUMENT_LABELS[s]}' for s in SHORTS
-]
+st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
+
+tab_names = ['Overview', 'All Projections', 'All Signals', 'Instrument']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
@@ -817,10 +821,10 @@ with tabs[2]:
         )
         st.plotly_chart(chart_signals_all(ind_ranged, s), width='stretch', key=f'allsig_chart_{s}')
 
-# ── Per-instrument tabs ────────────────────────────────────────────────────────
+# ── Instrument tab (driven by the sidebar slicer, not a tab per instrument) ────
 
-for i, short in enumerate(SHORTS):
-    with tabs[3 + i]:
+for short in [selected_instrument]:  # loops exactly once — keeps the body's indentation as-is
+    with tabs[3]:
         eff = effective_source(short, source_choice)
         price, fut, ind, sim = get_instrument_data(short, eff)
         if ind.empty:
