@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
@@ -212,6 +211,103 @@ def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f
     """
 
 
+def _proj_price_cell(v, ref, decimals: int) -> str:
+    try:
+        p = float(v)
+        if pd.isna(p):
+            raise ValueError
+    except Exception:
+        return '<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;color:#aaa;border-bottom:1px solid #f0f0f0;">—</td>'
+    diff = p - ref if ref is not None else 0
+    color = '#1b8a3d' if diff > 0 else '#c62828' if diff < 0 else '#444'
+    return (f'<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;'
+            f'color:{color};font-weight:700;border-bottom:1px solid #f0f0f0;">{p:,.{decimals}f}</td>')
+
+
+def _proj_sig_cell(v, bold: bool = False) -> str:
+    try:
+        val = float(v)
+        if pd.isna(val):
+            raise ValueError
+    except Exception:
+        return '<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;color:#aaa;border-bottom:1px solid #f0f0f0;">—</td>'
+    color = '#1b8a3d' if val > 0 else '#c62828' if val < 0 else '#555'
+    weight = '700' if bold else '500'
+    return (f'<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;'
+            f'color:{color};font-weight:{weight};border-bottom:1px solid #f0f0f0;">{val * 100:+.0f}</td>')
+
+
+def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str = None) -> str:
+    """UP(day10->1) / UNCH / DOWN(1->10) projection table — mirrors the original
+    Dash _projection_table() layout, always showing all 5 signals (ST/MT/LT/All/
+    WAll) regardless of which one the chart is filtered to. Actual_Close is an
+    addition not present in the original (backfilled outcome for past horizons)."""
+    if sim_sel.empty:
+        return '<div style="color:#888;font-size:0.82rem;">No simulation data.</div>'
+
+    decimals = PRICE_DECIMALS.get(short, 2)
+    s = sim_sel.set_index('Horizon_Day').sort_index()
+    head_price = float(s['price_unch'].iloc[0])
+    label = futures_name or short
+
+    _TH = ('padding:4px 8px;font-size:0.68rem;color:#888;border-bottom:2px solid #dee2e6;'
+          'text-align:right;background:#f8f9fa;')
+    thead = (
+        f'<tr><th style="{_TH}text-align:left;"></th>'
+        f'<th style="{_TH}text-align:left;">{label} <span style="color:#1976D2;">Last: {head_price:,.{decimals}f}</span></th>'
+        f'<th style="{_TH}">ST</th><th style="{_TH}">MT</th><th style="{_TH}">LT</th>'
+        f'<th style="{_TH}">All</th><th style="{_TH}color:#7B1FA2;">WAll</th></tr>'
+    )
+
+    rows = ['<tr>'
+           '<td style="padding:4px 8px;font-weight:700;color:#1b8a3d;font-size:0.75rem;">UP</td>'
+           + '<td style="border-bottom:none;"></td>' * 6 + '</tr>']
+    for day in range(len(s), 0, -1):
+        if day not in s.index:
+            continue
+        row = s.loc[day]
+        rows.append(
+            f'<tr><td style="padding:3px 8px;color:#aaa;font-size:0.68rem;">Day {day}</td>'
+            + _proj_price_cell(row.get('price_up'), head_price, decimals)
+            + _proj_sig_cell(row.get('ST_up')) + _proj_sig_cell(row.get('MT_up')) + _proj_sig_cell(row.get('LT_up'))
+            + _proj_sig_cell(row.get('All_up')) + _proj_sig_cell(row.get('WAll_up'), bold=True) + '</tr>'
+        )
+
+    if 1 in s.index:
+        unch = s.loc[1]
+        rows.append(
+            '<tr><td style="padding:4px 8px;font-weight:700;color:#1976D2;font-size:0.75rem;'
+            'border-top:2px solid #1976D2;border-bottom:2px solid #1976D2;">UNCH</td>'
+            + _proj_price_cell(head_price, None, decimals)
+            + _proj_sig_cell(unch.get('ST_unch')) + _proj_sig_cell(unch.get('MT_unch')) + _proj_sig_cell(unch.get('LT_unch'))
+            + _proj_sig_cell(unch.get('All_unch')) + _proj_sig_cell(unch.get('WAll_unch'), bold=True) + '</tr>'
+        )
+
+    for day in range(1, len(s) + 1):
+        if day not in s.index:
+            continue
+        row = s.loc[day]
+        rows.append(
+            f'<tr><td style="padding:3px 8px;color:#aaa;font-size:0.68rem;">Day {day}</td>'
+            + _proj_price_cell(row.get('price_down'), head_price, decimals)
+            + _proj_sig_cell(row.get('ST_down')) + _proj_sig_cell(row.get('MT_down')) + _proj_sig_cell(row.get('LT_down'))
+            + _proj_sig_cell(row.get('All_down')) + _proj_sig_cell(row.get('WAll_down'), bold=True) + '</tr>'
+        )
+    rows.append('<tr>'
+               '<td style="padding:4px 8px;font-weight:700;color:#c62828;font-size:0.75rem;border-top:2px solid #c62828;">DOWN</td>'
+               + '<td style="border-bottom:none;"></td>' * 6 + '</tr>')
+
+    return f"""
+    <div style="overflow-x:auto;">
+    <table style="border-collapse:collapse;width:100%;font-family:inherit;">
+        <thead>{thead}</thead>
+        <tbody>{"".join(rows)}</tbody>
+    </table>
+    <div style="color:#aaa;font-size:0.65rem;margin-top:4px;">Signal columns scaled ×100 (range −100 to +100)</div>
+    </div>
+    """
+
+
 def date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     """Sticky-controls-row equivalent: radio for quick ranges + custom picker."""
     c1, c2 = st.columns([2, 2])
@@ -245,57 +341,122 @@ def add_tuesday_lines(fig: go.Figure, idx: pd.DatetimeIndex, row=None, col=None)
 # ── Chart builders ────────────────────────────────────────────────────────────
 
 def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesdays: bool):
+    """Front-month futures is the primary line (falls back to the GSCI index if
+    futures history is empty) — matches the original Dash chart_price(), which
+    plots futures_price and only falls back to price_history (GSCI) when the
+    futures table has no rows yet. GSCI is shown as a thin secondary overlay
+    since it's the actual signal-computation basis."""
     fig = go.Figure()
     color = MKT_COLOR.get(short, '#1f77b4')
-    fig.add_trace(go.Scatter(x=price.index, y=price['CLOSE'], name=f'{short} GSCI Index',
-                             line=dict(color=color, width=1.6)))
+    primary, primary_name = (fut, 'Futures (front-month)') if not fut.empty else (price, 'GSCI Index')
+    fig.add_trace(go.Scatter(x=primary.index, y=primary['CLOSE'], name=f'{short} {primary_name}',
+                             line=dict(color=color, width=1.8)))
     if not fut.empty:
-        fig.add_trace(go.Scatter(x=fut.index, y=fut['CLOSE'], name=f'{short} Futures (front-month)',
+        fig.add_trace(go.Scatter(x=price.index, y=price['CLOSE'], name=f'{short} GSCI Index (signal basis)',
                                  line=dict(color=color, width=1.0, dash='dot'), yaxis='y2'))
-        fig.update_layout(yaxis2=dict(overlaying='y', side='right', showgrid=False, title='Futures'))
+        fig.update_layout(yaxis2=dict(overlaying='y', side='right', showgrid=False, title='GSCI'))
     fig.update_layout(
         template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation='h', y=1.08), yaxis_title='GSCI Index Level',
+        legend=dict(orientation='h', y=1.08), yaxis_title=primary_name,
         title=f'{INSTRUMENT_LABELS.get(short, short)} — Price',
     )
     if show_tuesdays:
-        add_tuesday_lines(fig, price.index)
+        add_tuesday_lines(fig, primary.index)
     return fig
 
 
 def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
+    """Single selected composite + optional raw underlying signals (an addition
+    beyond the original, which only ever showed the 5 composites — see
+    chart_signals_all() for that). Scaled x100 to match the original's display
+    convention (range -100..+100) for visual consistency across the dashboard."""
     fig = go.Figure()
     for col in show_cols:
-        fig.add_trace(go.Scatter(x=ind.index, y=ind[col], name=col, line=dict(width=0.8), opacity=0.35))
-    fig.add_trace(go.Scatter(x=ind.index, y=ind[composite], name=composite,
+        fig.add_trace(go.Scatter(x=ind.index, y=ind[col] * 100, name=col, line=dict(width=0.8), opacity=0.35))
+    fig.add_trace(go.Scatter(x=ind.index, y=ind[composite] * 100, name=composite,
                              line=dict(color='#FFD54F', width=2.4)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(
         template=PLOTLY_TEMPLATE, height=320, margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation='h', y=1.1), yaxis=dict(range=[-1.05, 1.05]),
+        legend=dict(orientation='h', y=1.1), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
         title=f'Signals — {composite}',
     )
     return fig
 
 
-def chart_projection(sim_latest: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str):
-    """sim_latest: rows for the most recent Run_Date, 10 horizon days, one row per scenario col set."""
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.6, 0.4], vertical_spacing=0.08,
-                        subplot_titles=(f'{signal_col} projection', 'Price scenarios'))
-    scen_colors = {'up': '#4CAF50', 'down': '#EF5350', 'unch': '#9E9E9E'}
-    for scen in ['up', 'down', 'unch']:
-        col = f'{signal_col}_{scen}' if signal_col != 'All' else f'All_{scen}'
-        if col not in sim_latest.columns:
-            col = f'{signal_col}_{scen}'
-        fig.add_trace(go.Scatter(x=sim_latest['Horizon_Date'], y=sim_latest[col], name=f'Signal ({scen})',
-                                 line=dict(color=scen_colors[scen], width=2)), row=1, col=1)
+def chart_signals_all(ind: pd.DataFrame, short: str):
+    """The instrument's own ST/MT/LT/All/WAll composites together — matches the
+    original Dash chart_signals() used in the All Signals tab (one chart per
+    instrument, all 5 composites, x100 scale)."""
+    color = MKT_COLOR.get(short, '#1f77b4')
+    traces = {
+        'ST':   ('ST_Avg',   '#aaaaaa', 1.2, 'dot'),
+        'MT':   ('MT_Avg',   '#888888', 1.2, 'dash'),
+        'LT':   ('LT_Avg',   '#555555', 1.5, 'solid'),
+        'All':  ('All_Avg',  color,     2.5, 'solid'),
+        'WAll': ('WAll_Avg', '#7B1FA2', 2.0, 'dashdot'),
+    }
+    fig = go.Figure()
+    for name, (col, clr, width, dash) in traces.items():
+        if col not in ind.columns:
+            continue
+        fig.add_trace(go.Scatter(x=ind.index, y=ind[col] * 100, name=name,
+                                 line=dict(color=clr, width=width, dash=dash)))
+    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=280, margin=dict(l=10, r=10, t=20, b=10),
+        legend=dict(orientation='h', y=1.12), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
+    )
+    return fig
+
+
+def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
+                     ind: pd.DataFrame = None):
+    """Historical trailing signal (last 7 actual days) feeding into a 3-scenario
+    10-day fan, with price labels at each node — matches the original Dash
+    chart_projection() (single chart, not a 2-row subplot; price shown as text
+    labels rather than a separate price panel)."""
+    if sim_sel.empty:
+        return go.Figure()
+
+    color = MKT_COLOR.get(short, '#1f77b4')
+    sig_col = f'{signal_col}_Avg'
+    hist_sig = (ind[[sig_col]].tail(7) if ind is not None and not ind.empty and sig_col in ind.columns
+               else pd.DataFrame())
+    anchor_date = hist_sig.index[-1] if not hist_sig.empty else sim_sel['Horizon_Date'].min()
+    last_sig_val = float(hist_sig[sig_col].iloc[-1]) * 100 if not hist_sig.empty else 0.0
+
+    fig = go.Figure()
+    if not hist_sig.empty:
+        fig.add_trace(go.Scatter(x=hist_sig.index, y=hist_sig[sig_col] * 100, name='Actual',
+                                 line=dict(color=color, width=2)))
+
+    scen_style = {
+        'up':   ('↑ UP',   '#1b8a3d', 'dash',    'top center'),
+        'down': ('↓ DOWN', '#c62828', 'dot',     'bottom center'),
+        'unch': ('UNCH',   '#9E9E9E', 'dashdot', 'middle right'),
+    }
+    for scen, (name, clr, dash, tpos) in scen_style.items():
+        col = f'{signal_col}_{scen}'
+        if col not in sim_sel.columns:
+            continue
         pcol = f'price_{scen}'
-        if pcol in sim_latest.columns:
-            fig.add_trace(go.Scatter(x=sim_latest['Horizon_Date'], y=sim_latest[pcol], name=f'Price ({scen})',
-                                     line=dict(color=scen_colors[scen], width=1.4, dash='dash')), row=2, col=1)
-    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=1)
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=400, margin=dict(l=10, r=10, t=50, b=10),
-                      legend=dict(orientation='h', y=1.08))
+        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
+        y_vals = [round(last_sig_val)] + [round(v * 100) for v in sim_sel[col]]
+        x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
+        p_labels = [''] + [f'{p:,.2f}' for p in prices]
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=y_vals, name=name, mode='lines+markers+text',
+            line=dict(color=clr, width=1.8, dash=dash), marker=dict(size=6, color=clr),
+            text=p_labels, textposition=tpos, textfont=dict(size=9, color=clr),
+        ))
+
+    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=400, margin=dict(l=10, r=10, t=40, b=10),
+        legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
+        title=f'{signal_col} — Signal Projection',
+    )
     return fig
 
 
@@ -333,13 +494,51 @@ def chart_weekly_change(ind: pd.DataFrame, view: str):
     return fig
 
 
+def chart_weekly_change_total(ind: pd.DataFrame, view: str):
+    """Simple green/red bar of the total weekly change only — a separate,
+    simpler companion chart to chart_weekly_change() in the original Dash app
+    (chart_weekly_change_total()), missing from the first Streamlit port."""
+    tues = ind[ind.index.dayofweek == 1].copy().sort_index()
+    if len(tues) < 2:
+        return go.Figure()
+    total_col = 'WAll_Avg' if view == 'WAll' else 'All_Avg'
+    if total_col not in tues.columns:
+        return go.Figure()
+    d_tot = tues[total_col].diff().iloc[1:] * 100
+    colors = ['#1b8a3d' if v >= 0 else '#c62828' for v in d_tot]
+    fig = go.Figure(go.Bar(x=tues.index[1:], y=d_tot, marker_color=colors, name=f'Δ{total_col}'))
+    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=200, margin=dict(l=10, r=10, t=20, b=10),
+                      showlegend=False, yaxis=dict(dtick=5, tickformat='+.0f'),
+                      title=f'Total Weekly Change ({view})')
+    return fig
+
+
+def _safe_val(series: pd.Series, offset: int = 0) -> float:
+    """series.iloc[-1-offset], or NaN if there aren't enough rows — mirrors the
+    original _safe_val() used for the Overview change columns."""
+    idx = len(series) - 1 - offset
+    return float(series.iloc[idx]) if idx >= 0 else np.nan
+
+
 def overview_row(short: str) -> dict:
     price, fut, ind, sim = get_instrument_data(short)
     if ind.empty:
         return {'Commodity': short, 'Label': INSTRUMENT_LABELS.get(short, short)}
     last = ind.iloc[-1]
-    prev = ind.iloc[-2] if len(ind) > 1 else last
     fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
+
+    all_v = _safe_val(ind['All_Avg'])
+    chg1d  = (_safe_val(ind['WAll_Avg']) - _safe_val(ind['WAll_Avg'], 1)) if 'WAll_Avg' in ind.columns else np.nan
+    chg5d  = all_v - _safe_val(ind['All_Avg'], 5)
+    chg10d = all_v - _safe_val(ind['All_Avg'], 10)
+
+    tues = ind.index[(ind.index.dayofweek == 1) & (ind.index < ind.index[-1])]
+    t1_val = float(ind.loc[tues[-1], 'All_Avg']) if len(tues) >= 1 else np.nan
+    t2_val = float(ind.loc[tues[-2], 'All_Avg']) if len(tues) >= 2 else np.nan
+    chg_t1 = all_v - t1_val
+    chg_t2 = all_v - t2_val
+
     return {
         'Commodity': short,
         'Label': INSTRUMENT_LABELS.get(short, short),
@@ -349,7 +548,11 @@ def overview_row(short: str) -> dict:
         'LT_Avg': round(last['LT_Avg'], 3),
         'All_Avg': round(last['All_Avg'], 3),
         'WAll_Avg': round(last['WAll_Avg'], 3),
-        'Δ WAll_Avg (1d)': round(last['WAll_Avg'] - prev['WAll_Avg'], 3),
+        'Δ 1d': round(chg1d, 3),
+        'Δ 5d': round(chg5d, 3),
+        'Δ 10d': round(chg10d, 3),
+        'Δ Tue': round(chg_t1, 3),
+        'Δ 2nd Tue': round(chg_t2, 3),
         'As of': last.name.date().isoformat(),
     }
 
@@ -384,7 +587,10 @@ with tabs[0]:
     # KPI cards folded into the table below (they showed the same WAll_Avg/Δ
     # numbers redundantly) — one compact table instead of cards + table.
     st.markdown(
-        html_table(overview_df, signed_cols=('ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg', 'Δ WAll_Avg (1d)')),
+        html_table(overview_df, signed_cols=(
+            'ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg',
+            'Δ 1d', 'Δ 5d', 'Δ 10d', 'Δ Tue', 'Δ 2nd Tue',
+        )),
         unsafe_allow_html=True,
     )
 
@@ -402,28 +608,34 @@ with tabs[1]:
         latest_run = sim['Run_Date'].max()
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
         st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()})")
-        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s),
-                        use_container_width=True, key=f'allproj_chart_{s}')
+        col_chart, col_table = st.columns([7, 5])
+        with col_chart:
+            st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind),
+                            use_container_width=True, key=f'allproj_chart_{s}')
+        with col_table:
+            st.markdown(
+                projection_table_html(sim_latest, s),
+                unsafe_allow_html=True,
+            )
 
 # ── All Signals tab ──────────────────────────────────────────────────────────
 
 with tabs[2]:
-    st.markdown(section_header('All Signals — Composite Comparison',
-                               'Overlay of one composite signal across every instrument'),
+    st.markdown(section_header('All Signals — CTA Signals per Instrument',
+                               'Each instrument\'s own ST/MT/LT/All/WAll composites, stacked'),
                unsafe_allow_html=True)
-    composite_choice = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
-                                horizontal=True, key='allsig_composite')
-    fig = go.Figure()
     for s in SHORTS:
         _, _, ind, _ = get_instrument_data(s)
         if ind.empty:
             continue
-        fig.add_trace(go.Scatter(x=ind.index, y=ind[composite_choice], name=s,
-                                 line=dict(color=MKT_COLOR.get(s, None), width=1.6)))
-    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=340, margin=dict(l=10, r=10, t=30, b=10),
-                      legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-1.05, 1.05]))
-    st.plotly_chart(fig, use_container_width=True, key='allsignals_chart')
+        ind_ranged = date_range_filter(ind, f'allsig_{s}')
+        st.markdown(
+            f'<div style="border-bottom:2px solid {MKT_COLOR.get(s, "#333")};padding-bottom:3px;margin:6px 0;">'
+            f'<span style="font-weight:700;color:{MKT_COLOR.get(s, "#333")};">{s}</span>'
+            f'<span style="color:#888;margin-left:6px;">{INSTRUMENT_LABELS[s]}</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(chart_signals_all(ind_ranged, s), use_container_width=True, key=f'allsig_chart_{s}')
 
 # ── Per-instrument tabs ────────────────────────────────────────────────────────
 
@@ -434,18 +646,22 @@ for i, short in enumerate(SHORTS):
             st.warning(f'No data for {short}.')
             continue
 
-        st.markdown(section_header(f'{short} — {INSTRUMENT_LABELS[short]}',
-                                   'GSCI-based trend signal, front-month futures shown for reference'),
-                   unsafe_allow_html=True)
-
         last = ind.iloc[-1]
         fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
+        st.markdown(section_header(
+            f'{short} — {INSTRUMENT_LABELS[short]}',
+            f'Futures: {fmt_price(short, fut_last)}  |  GSCI-based trend signal',
+        ), unsafe_allow_html=True)
+
+        # KPI row matches the original's 5 composites (ST/MT/LT/All/WAll, x100
+        # int-style display); futures price moved to the header above instead
+        # of a 6th card, to match the original's exact KPI set.
         kc1, kc2, kc3, kc4, kc5 = st.columns(5)
-        kc1.markdown(kpi_card('Futures Price', fmt_price(short, fut_last)), unsafe_allow_html=True)
-        kc2.markdown(kpi_card('ST_Avg', f"{last['ST_Avg']:+.3f}"), unsafe_allow_html=True)
-        kc3.markdown(kpi_card('MT_Avg', f"{last['MT_Avg']:+.3f}"), unsafe_allow_html=True)
-        kc4.markdown(kpi_card('LT_Avg', f"{last['LT_Avg']:+.3f}"), unsafe_allow_html=True)
-        kc5.markdown(kpi_card('WAll_Avg', f"{last['WAll_Avg']:+.3f}"), unsafe_allow_html=True)
+        kc1.markdown(kpi_card('ST', f"{last['ST_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
+        kc2.markdown(kpi_card('MT', f"{last['MT_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
+        kc3.markdown(kpi_card('LT', f"{last['LT_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
+        kc4.markdown(kpi_card('All', f"{last['All_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
+        kc5.markdown(kpi_card('WAll', f"{last['WAll_Avg'] * 100:+.0f}"), unsafe_allow_html=True)
         st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
 
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
@@ -471,6 +687,8 @@ for i, short in enumerate(SHORTS):
             ind_ranged_w = date_range_filter(ind, f'{short}_weekly')
             st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
                             use_container_width=True, key=f'{short}_weeklychart')
+            st.plotly_chart(chart_weekly_change_total(ind_ranged_w, view),
+                            use_container_width=True, key=f'{short}_weeklytotalchart')
 
         with sub_proj:
             if sim.empty:
@@ -482,15 +700,20 @@ for i, short in enumerate(SHORTS):
                 run_choice = st.selectbox('Run date', run_dates, format_func=lambda d: pd.Timestamp(d).date().isoformat(),
                                           key=f'{short}_rundate')
                 sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
-                st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short),
-                                use_container_width=True, key=f'{short}_projchart')
+                col_chart, col_table = st.columns([7, 5])
+                with col_chart:
+                    st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind),
+                                    use_container_width=True, key=f'{short}_projchart')
+                with col_table:
+                    st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)
 
-                proj_table = sim_sel[['Horizon_Date', 'Horizon_Day',
-                                      f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch',
-                                      'price_up', 'price_down', 'price_unch', 'Actual_Close']].copy()
-                proj_table['Horizon_Date'] = proj_table['Horizon_Date'].dt.date
+                st.caption(
+                    'Actual Close (backfilled outcome for past horizon dates) — not part of the '
+                    'original Dash table, shown here for a quick projection-vs-actual check.'
+                )
+                actual_tbl = sim_sel[['Horizon_Date', 'Horizon_Day', 'Actual_Close']].copy()
+                actual_tbl['Horizon_Date'] = actual_tbl['Horizon_Date'].dt.date
                 st.markdown(
-                    html_table(proj_table, signed_cols=(f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch'),
-                              decimals=PRICE_DECIMALS.get(short, 2)),
+                    html_table(actual_tbl, decimals=PRICE_DECIMALS.get(short, 2)),
                     unsafe_allow_html=True,
                 )
