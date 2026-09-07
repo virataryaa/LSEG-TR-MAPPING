@@ -627,9 +627,11 @@ def chart_weekly_change(ind: pd.DataFrame, view: str):
     fig.add_trace(go.Bar(x=tues.index, y=d_lt, name='LT contribution', marker_color='#BA68C8'))
     fig.add_trace(go.Scatter(x=tues.index, y=d_tot, name=f'Total Δ{total_col}',
                              line=dict(color='#FFD54F', width=2), mode='lines+markers'))
-    fig.update_layout(barmode='relative', template=PLOTLY_TEMPLATE, height=300,
-                      margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation='h', y=1.1),
-                      title=f'Weekly Change Decomposition ({view})')
+    fig.update_layout(
+        barmode='relative', template=PLOTLY_TEMPLATE, height=430, margin=dict(l=10, r=10, t=90, b=10),
+        title=dict(text=f'Weekly Change Decomposition ({view})', x=0, xanchor='left', y=0.99, yanchor='top'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0, font=dict(size=10)),
+    )
     return fig
 
 
@@ -647,7 +649,7 @@ def chart_weekly_change_total(ind: pd.DataFrame, view: str):
     colors = ['#1b8a3d' if v >= 0 else '#c62828' for v in d_tot]
     fig = go.Figure(go.Bar(x=tues.index[1:], y=d_tot, marker_color=colors, name=f'Δ{total_col}'))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=200, margin=dict(l=10, r=10, t=20, b=10),
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=280, margin=dict(l=10, r=10, t=40, b=10),
                       showlegend=False, yaxis=dict(dtick=5, tickformat='+.0f'),
                       title=f'Total Weekly Change ({view})')
     return fig
