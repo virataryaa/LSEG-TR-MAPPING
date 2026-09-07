@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+TR mapping old/
+run_log.txt
