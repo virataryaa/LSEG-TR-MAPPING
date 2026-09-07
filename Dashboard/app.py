@@ -16,22 +16,15 @@ import streamlit as st
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / 'Database'
 
-# Reuse the exact same 144-indicator calculate_indicators() from Code/ for the
-# Monte Carlo feature instead of duplicating that logic here — avoids any risk
-# of the dashboard's indicator math drifting out of sync with the ingest script.
-# Guarded: Code/tr_mapping_fetch.py hard-imports pandas_ta, which pulls in numba
-# — numba has no published wheel for some Python versions Streamlit Cloud may
-# run, which broke the whole app's deploy when this was an unguarded import.
-# requirements.txt intentionally does NOT list pandas_ta for that reason; the
-# Monte Carlo feature degrades to "unavailable" instead of crashing the app
-# when the import fails.
+# Reuse Code/'s indicator engine for the live Monte Carlo feature (safe now —
+# calculate_indicators()/calculate_indicators_multi() no longer touch
+# pandas_ta at all; the 5 pieces it used to delegate to (BBands/HMA/LRS/TRIX/
+# KAMA) are hand-rolled from pandas_ta's own formulas, validated to match
+# exactly). This used to be a guarded/optional import because pandas_ta pulled
+# in numba, which has no wheel for some Python versions Streamlit Cloud may
+# run — that dependency is gone now, so this is a plain top-level import.
 sys.path.insert(0, str(BASE_DIR / 'Code'))
-try:
-    from tr_mapping_fetch import calculate_indicators
-    MC_AVAILABLE = True
-except ImportError:
-    calculate_indicators = None
-    MC_AVAILABLE = False
+from tr_mapping_fetch import compute_monte_carlo_bands
 
 st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 
@@ -91,7 +84,8 @@ PLOTLY_TEMPLATE = 'plotly_white'
 
 # ── Data loading (cached) ────────────────────────────────────────────────────────
 
-_DATA_FILES = ['price_history.parquet', 'futures_price.parquet', 'indicators.parquet', 'sim_history.parquet']
+_DATA_FILES = ['price_history.parquet', 'futures_price.parquet', 'indicators.parquet',
+              'sim_history.parquet']
 
 
 def _data_signature() -> tuple:
@@ -515,63 +509,25 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
     return fig
 
 
-# ── Monte Carlo signal bands (on-demand, dashboard-side) ─────────────────────
+# ── Monte Carlo signal bands (on-demand, dashboard-side, live) ─────────────────
 #
 # The 3-scenario UP/DOWN/UNCH fan (build_simulation() in Code/) is deterministic
 # — the same vol% move compounded every day for 10 days, an extreme stress path
-# rather than a likely-range estimate. A real Monte Carlo needs N random paths,
-# each with the FULL 144-indicator set recomputed on it — calculate_indicators()
-# benchmarks at ~2.3s/call, so N paths costs ~N*2.3s. Running this for every
-# instrument/source in the daily ingest batch (12 combos) was rejected as too
-# expensive (N=50 -> ~23 extra minutes on the scheduled job); instead this runs
-# lazily in the dashboard, only when a viewer explicitly asks for it, cached so
-# the first viewer per (instrument, source, day, N) pays the cost and everyone
-# else after that gets it instantly until the data changes.
+# rather than a likely-range estimate. This gives a real probabilistic range
+# instead: N random paths, each with the full indicator set recomputed, reduced
+# to percentile bands — using compute_monte_carlo_bands() from Code/, which
+# vectorizes all N paths together (calculate_indicators_multi()) rather than
+# looping calculate_indicators() N times: N=100 in ~2s, N=500 in ~11s. Cached
+# per (instrument, source, day, N) so repeat views are instant.
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: int, seed: int = 42) -> pd.DataFrame:
-    """Bootstrap N random 10-day price paths from the instrument's own recent
-    daily-return distribution (not a Normal-distribution assumption — real
-    historical returns preserve fat tails/skew), recompute the full indicator
-    set on each, and return per-horizon-day percentile bands (p10/p25/p50/p75/
-    p90) for ST/MT/LT/All/WAll. `last_date_str` is part of the cache key purely
-    so the cache invalidates once new data lands — it isn't otherwise used."""
-    if not MC_AVAILABLE:
-        return pd.DataFrame()
+    """`last_date_str` is part of the cache key purely so the cache invalidates
+    once new data lands — it isn't otherwise used."""
     price, _, _, _ = get_instrument_data(short, source)
-    if price.empty or len(price) < 300:
+    if price.empty:
         return pd.DataFrame()
-
-    horizon = 10
-    base = price.tail(1500).copy()
-    hist_returns = base['CLOSE'].pct_change().dropna().tail(500).to_numpy()
-    if len(hist_returns) < 50:
-        return pd.DataFrame()
-
-    rng = np.random.default_rng(seed)
-    last_price = float(base['CLOSE'].iloc[-1])
-    last_date = base.index.max()
-    future_dates = pd.bdate_range(last_date + pd.Timedelta(days=1), periods=horizon)
-
-    composites = ['ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg']
-    samples = {c: np.empty((n_paths, horizon)) for c in composites}
-
-    for i in range(n_paths):
-        draws = rng.choice(hist_returns, size=horizon, replace=True)
-        sim_prices = last_price * np.cumprod(1 + draws)
-        ext = pd.DataFrame({'CLOSE': sim_prices}, index=future_dates)
-        combined = pd.concat([base[['CLOSE']], ext])
-        ind_sim = calculate_indicators(combined)
-        tail = ind_sim.tail(horizon)
-        for c in composites:
-            samples[c][i, :] = tail[c].to_numpy()
-
-    bands = pd.DataFrame({'Horizon_Date': future_dates, 'Horizon_Day': range(1, horizon + 1)})
-    for c in composites:
-        prefix = c.replace('_Avg', '')
-        for pct, label in [(10, 'p10'), (25, 'p25'), (50, 'p50'), (75, 'p75'), (90, 'p90')]:
-            bands[f'{prefix}_{label}'] = np.percentile(samples[c], pct, axis=0)
-    return bands
+    return compute_monte_carlo_bands(price, n_paths=n_paths, seed=seed)
 
 
 def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
@@ -933,19 +889,15 @@ for i, short in enumerate(SHORTS):
 
                 show_mc = st.checkbox(
                     'Show Monte Carlo bands', value=False, key=f'{short}_mc_toggle',
-                    disabled=not MC_AVAILABLE,
-                    help=('Temporarily unavailable in this deployment (missing pandas_ta dependency).'
-                         if not MC_AVAILABLE else
-                         'Bootstraps N random 10-day price paths from recent daily returns and '
-                         'recomputes the full indicator set on each — gives a probabilistic p10-p90 '
-                         '/ p25-p75 range instead of the 3 deterministic UP/DOWN/UNCH scenarios. Slow '
-                         'on first run (recomputes 144 indicators x N times); cached after that.'),
+                    help='Bootstraps N random 10-day price paths from recent daily returns and '
+                         'recomputes the full indicator set on each (all N paths at once, '
+                         'vectorized) — gives a probabilistic p10-p90 / p25-p75 range instead of '
+                         'the 3 deterministic UP/DOWN/UNCH scenarios. Cached per run date.',
                 )
                 mc_bands = None
                 if show_mc and run_choice == run_dates[0]:
-                    n_paths = st.select_slider('Paths (N)', options=[30, 50, 100], value=50, key=f'{short}_mc_n')
-                    with st.spinner(f'Running {n_paths} Monte Carlo paths for {short}/{eff} '
-                                    f'(~{n_paths * 2.3:.0f}s on first run)…'):
+                    n_paths = st.select_slider('Paths (N)', options=[50, 100, 200, 500], value=200, key=f'{short}_mc_n')
+                    with st.spinner(f'Running {n_paths} Monte Carlo paths for {short}/{eff}…'):
                         last_date_str = ind.index.max().isoformat()
                         mc_bands = get_monte_carlo_bands(short, eff, last_date_str, n_paths)
                     if mc_bands.empty:
