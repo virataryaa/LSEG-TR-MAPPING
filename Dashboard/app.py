@@ -162,13 +162,33 @@ def _cell_style(val, numeric: bool, signed: bool) -> str:
     return base
 
 
-def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f}') -> str:
+def _fmt_header(c: str) -> str:
+    return c.replace('_', ' ')
+
+
+def _fmt_cell(val, is_numeric: bool, is_signed: bool, decimals: int, num_fmt: str) -> str:
+    """One consistent decimal count for every numeric cell — signed columns use
+    num_fmt (with +/- sign), plain numeric columns use `decimals` places with a
+    thousands separator, everything else (dates/strings) is left as-is. NaN
+    always renders as an em-dash, never the literal 'nan'."""
+    if is_numeric and pd.isna(val):
+        return '—'
+    if is_signed:
+        return num_fmt.format(val)
+    if is_numeric:
+        return f'{val:,.{decimals}f}'
+    return str(val)
+
+
+def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f}', decimals: int = 2) -> str:
     """Renders a DataFrame as a fully inline-styled HTML table (no external CSS
     classes) — bordered header, zebra striping, right-aligned numerics, and
-    green/red coloring on columns listed in signed_cols."""
+    green/red coloring on columns listed in signed_cols. Every numeric column
+    (signed or not) is rounded to a single consistent decimal count so nothing
+    shows raw float noise like 303.0118775986856."""
     thead = "".join(
         f'<th style="padding:8px 12px;background:#1f2937;color:#fff;font-size:0.78rem;'
-        f'text-transform:uppercase;letter-spacing:0.03em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{c}</th>'
+        f'text-transform:uppercase;letter-spacing:0.03em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{_fmt_header(c)}</th>'
         for c in df.columns
     )
     rows_html = []
@@ -179,7 +199,7 @@ def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f
             val = row[c]
             is_numeric = isinstance(val, (int, float, np.floating, np.integer)) and not isinstance(val, bool)
             is_signed = c in signed_cols and is_numeric
-            display = num_fmt.format(val) if is_signed and not pd.isna(val) else str(val)
+            display = _fmt_cell(val, is_numeric, is_signed, decimals, num_fmt)
             cells.append(f'<td style="{_cell_style(val, is_numeric, is_signed)}">{display}</td>')
         rows_html.append(f'<tr style="background:{bg};">{"".join(cells)}</tr>')
     return f"""
@@ -481,6 +501,7 @@ for i, short in enumerate(SHORTS):
                                       'price_up', 'price_down', 'price_unch', 'Actual_Close']].copy()
                 proj_table['Horizon_Date'] = proj_table['Horizon_Date'].dt.date
                 st.markdown(
-                    html_table(proj_table, signed_cols=(f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch')),
+                    html_table(proj_table, signed_cols=(f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch'),
+                              decimals=PRICE_DECIMALS.get(short, 2)),
                     unsafe_allow_html=True,
                 )
