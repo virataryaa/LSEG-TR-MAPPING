@@ -138,6 +138,60 @@ def kpi_card(label: str, value: str, sub: str = '') -> str:
     </div>"""
 
 
+def section_header(title: str, subtitle: str = '') -> str:
+    sub_html = (f'<div style="font-size:0.85rem;color:#777;margin-top:2px;">{subtitle}</div>'
+                if subtitle else '')
+    return f"""<div style="border-bottom:2px solid #1f77b4;padding-bottom:6px;margin:6px 0 16px 0;">
+        <div style="font-size:1.35rem;font-weight:700;color:#111;">{title}</div>
+        {sub_html}
+    </div>"""
+
+
+def _cell_style(val, numeric: bool, signed: bool) -> str:
+    base = "padding:7px 12px;border-bottom:1px solid #eceff1;font-size:0.86rem;"
+    base += "text-align:right;" if numeric else "text-align:left;"
+    if signed and isinstance(val, (int, float)) and not pd.isna(val):
+        if val > 0:
+            base += "color:#1b8a3d;font-weight:600;"
+        elif val < 0:
+            base += "color:#c62828;font-weight:600;"
+        else:
+            base += "color:#444;"
+    else:
+        base += "color:#222;"
+    return base
+
+
+def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f}') -> str:
+    """Renders a DataFrame as a fully inline-styled HTML table (no external CSS
+    classes) — bordered header, zebra striping, right-aligned numerics, and
+    green/red coloring on columns listed in signed_cols."""
+    thead = "".join(
+        f'<th style="padding:8px 12px;background:#1f2937;color:#fff;font-size:0.78rem;'
+        f'text-transform:uppercase;letter-spacing:0.03em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{c}</th>'
+        for c in df.columns
+    )
+    rows_html = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        bg = '#ffffff' if i % 2 == 0 else '#f7f9fb'
+        cells = []
+        for c in df.columns:
+            val = row[c]
+            is_numeric = isinstance(val, (int, float, np.floating, np.integer)) and not isinstance(val, bool)
+            is_signed = c in signed_cols and is_numeric
+            display = num_fmt.format(val) if is_signed and not pd.isna(val) else str(val)
+            cells.append(f'<td style="{_cell_style(val, is_numeric, is_signed)}">{display}</td>')
+        rows_html.append(f'<tr style="background:{bg};">{"".join(cells)}</tr>')
+    return f"""
+    <div style="overflow-x:auto;border:1px solid #dfe3e8;border-radius:8px;">
+    <table style="width:100%;border-collapse:collapse;font-family:inherit;">
+        <thead><tr>{thead}</tr></thead>
+        <tbody>{"".join(rows_html)}</tbody>
+    </table>
+    </div>
+    """
+
+
 def date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     """Sticky-controls-row equivalent: radio for quick ranges + custom picker."""
     c1, c2 = st.columns([2, 2])
@@ -281,7 +335,18 @@ def overview_row(short: str) -> dict:
 
 # ── Sidebar navigation ──────────────────────────────────────────────────────────
 
-st.sidebar.title('CTA Trend Signals')
+st.sidebar.markdown(
+    """<div style="padding:4px 0 12px 0;">
+        <div style="font-size:1.15rem;font-weight:700;color:#111;">CTA Trend Signals</div>
+        <div style="font-size:0.78rem;color:#777;margin-top:2px;">
+            Trend-following signal monitor for GSCI single-commodity sub-indices
+        </div>
+    </div>""",
+    unsafe_allow_html=True,
+)
+last_update = ind_all['Date'].max()
+st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
+
 tab_names = ['Overview', 'All Projections', 'All Signals'] + [
     f'{s} — {INSTRUMENT_LABELS[s]}' for s in SHORTS
 ]
@@ -290,7 +355,9 @@ tabs = st.tabs(tab_names)
 # ── Overview tab ──────────────────────────────────────────────────────────────
 
 with tabs[0]:
-    st.subheader('Overview — All Instruments')
+    st.markdown(section_header('Overview — All Instruments',
+                               'Latest composite trend signals across the GSCI sub-index universe'),
+               unsafe_allow_html=True)
     rows = [overview_row(s) for s in SHORTS]
     overview_df = pd.DataFrame(rows)
 
@@ -306,13 +373,18 @@ with tabs[0]:
                 f"Δ1d {delta:+.3f}" if pd.notna(delta) else '',
             ), unsafe_allow_html=True)
 
-    st.markdown('')
-    st.dataframe(overview_df, use_container_width=True, hide_index=True)
+    st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+    st.markdown(
+        html_table(overview_df, signed_cols=('ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg', 'Δ WAll_Avg (1d)')),
+        unsafe_allow_html=True,
+    )
 
 # ── All Projections tab ──────────────────────────────────────────────────────
 
 with tabs[1]:
-    st.subheader('All Projections — Latest Simulation Run')
+    st.markdown(section_header('All Projections — Latest Simulation Run',
+                               '10-business-day forward scenarios (up / down / unchanged) per instrument'),
+               unsafe_allow_html=True)
     signal_choice = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'], horizontal=True, key='allproj_signal')
     for s in SHORTS:
         price, fut, ind, sim = get_instrument_data(s)
@@ -321,12 +393,15 @@ with tabs[1]:
         latest_run = sim['Run_Date'].max()
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
         st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()})")
-        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s), use_container_width=True)
+        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s),
+                        use_container_width=True, key=f'allproj_chart_{s}')
 
 # ── All Signals tab ──────────────────────────────────────────────────────────
 
 with tabs[2]:
-    st.subheader('All Signals — Composite Comparison')
+    st.markdown(section_header('All Signals — Composite Comparison',
+                               'Overlay of one composite signal across every instrument'),
+               unsafe_allow_html=True)
     composite_choice = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
                                 horizontal=True, key='allsig_composite')
     fig = go.Figure()
@@ -339,7 +414,7 @@ with tabs[2]:
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(template=PLOTLY_TEMPLATE, height=520, margin=dict(l=10, r=10, t=30, b=10),
                       legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-1.05, 1.05]))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key='allsignals_chart')
 
 # ── Per-instrument tabs ────────────────────────────────────────────────────────
 
@@ -350,6 +425,10 @@ for i, short in enumerate(SHORTS):
             st.warning(f'No data for {short}.')
             continue
 
+        st.markdown(section_header(f'{short} — {INSTRUMENT_LABELS[short]}',
+                                   'GSCI-based trend signal, front-month futures shown for reference'),
+                   unsafe_allow_html=True)
+
         last = ind.iloc[-1]
         fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
         kc1, kc2, kc3, kc4, kc5 = st.columns(5)
@@ -358,14 +437,15 @@ for i, short in enumerate(SHORTS):
         kc3.markdown(kpi_card('MT_Avg', f"{last['MT_Avg']:+.3f}"), unsafe_allow_html=True)
         kc4.markdown(kpi_card('LT_Avg', f"{last['LT_Avg']:+.3f}"), unsafe_allow_html=True)
         kc5.markdown(kpi_card('WAll_Avg', f"{last['WAll_Avg']:+.3f}"), unsafe_allow_html=True)
-        st.markdown('')
+        st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
 
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
 
         with sub_charts:
             show_tues = st.checkbox('Show Tuesday lines', value=False, key=f'{short}_tues')
             price_ranged = date_range_filter(price, f'{short}_price')
-            st.plotly_chart(chart_price(short, price_ranged, fut, show_tues), use_container_width=True)
+            st.plotly_chart(chart_price(short, price_ranged, fut, show_tues),
+                            use_container_width=True, key=f'{short}_pricechart')
 
             composite = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
                                  horizontal=True, key=f'{short}_composite')
@@ -374,12 +454,14 @@ for i, short in enumerate(SHORTS):
             show_underlying = st.checkbox('Show underlying signals', value=False, key=f'{short}_underlying')
             ind_ranged = date_range_filter(ind, f'{short}_ind')
             underlying = col_map[composite] if show_underlying else []
-            st.plotly_chart(chart_signals(ind_ranged, underlying, composite), use_container_width=True)
+            st.plotly_chart(chart_signals(ind_ranged, underlying, composite),
+                            use_container_width=True, key=f'{short}_sigchart')
 
         with sub_weekly:
             view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
             ind_ranged_w = date_range_filter(ind, f'{short}_weekly')
-            st.plotly_chart(chart_weekly_change(ind_ranged_w, view), use_container_width=True)
+            st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
+                            use_container_width=True, key=f'{short}_weeklychart')
 
         with sub_proj:
             if sim.empty:
@@ -391,10 +473,14 @@ for i, short in enumerate(SHORTS):
                 run_choice = st.selectbox('Run date', run_dates, format_func=lambda d: pd.Timestamp(d).date().isoformat(),
                                           key=f'{short}_rundate')
                 sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
-                st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short), use_container_width=True)
+                st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short),
+                                use_container_width=True, key=f'{short}_projchart')
 
                 proj_table = sim_sel[['Horizon_Date', 'Horizon_Day',
                                       f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch',
                                       'price_up', 'price_down', 'price_unch', 'Actual_Close']].copy()
                 proj_table['Horizon_Date'] = proj_table['Horizon_Date'].dt.date
-                st.dataframe(proj_table, use_container_width=True, hide_index=True)
+                st.markdown(
+                    html_table(proj_table, signed_cols=(f'{proj_signal}_up', f'{proj_signal}_down', f'{proj_signal}_unch')),
+                    unsafe_allow_html=True,
+                )
