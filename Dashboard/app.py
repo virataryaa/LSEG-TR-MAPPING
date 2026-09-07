@@ -46,12 +46,12 @@ st.markdown("""
 :root, .stApp { color-scheme: light !important; }
 .stApp { background-color: #ffffff !important; }
 .kpi-card {
-    background: #f7f8fa; border-radius: 8px; padding: 14px 18px;
+    background: #f7f8fa; border-radius: 6px; padding: 8px 12px;
     border: 1px solid #e0e0e0; text-align: center;
 }
-.kpi-label { color: #666; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.kpi-value { color: #111; font-size: 1.6rem; font-weight: 600; margin-top: 4px; }
-.kpi-sub { color: #888; font-size: 0.75rem; margin-top: 2px; }
+.kpi-label { color: #666; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.kpi-value { color: #111; font-size: 1.15rem; font-weight: 600; margin-top: 2px; }
+.kpi-sub { color: #888; font-size: 0.66rem; margin-top: 1px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -148,7 +148,7 @@ def section_header(title: str, subtitle: str = '') -> str:
 
 
 def _cell_style(val, numeric: bool, signed: bool) -> str:
-    base = "padding:7px 12px;border-bottom:1px solid #eceff1;font-size:0.86rem;"
+    base = "padding:4px 9px;border-bottom:1px solid #eceff1;font-size:0.78rem;"
     base += "text-align:right;" if numeric else "text-align:left;"
     if signed and isinstance(val, (int, float)) and not pd.isna(val):
         if val > 0:
@@ -187,8 +187,8 @@ def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.3f
     (signed or not) is rounded to a single consistent decimal count so nothing
     shows raw float noise like 303.0118775986856."""
     thead = "".join(
-        f'<th style="padding:8px 12px;background:#1f2937;color:#fff;font-size:0.78rem;'
-        f'text-transform:uppercase;letter-spacing:0.03em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{_fmt_header(c)}</th>'
+        f'<th style="padding:5px 9px;background:#1f2937;color:#fff;font-size:0.68rem;'
+        f'text-transform:uppercase;letter-spacing:0.02em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{_fmt_header(c)}</th>'
         for c in df.columns
     )
     rows_html = []
@@ -254,7 +254,7 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
                                  line=dict(color=color, width=1.0, dash='dot'), yaxis='y2'))
         fig.update_layout(yaxis2=dict(overlaying='y', side='right', showgrid=False, title='Futures'))
     fig.update_layout(
-        template=PLOTLY_TEMPLATE, height=420, margin=dict(l=10, r=10, t=30, b=10),
+        template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.08), yaxis_title='GSCI Index Level',
         title=f'{INSTRUMENT_LABELS.get(short, short)} — Price',
     )
@@ -271,7 +271,7 @@ def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
                              line=dict(color='#FFD54F', width=2.4)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(
-        template=PLOTLY_TEMPLATE, height=460, margin=dict(l=10, r=10, t=30, b=10),
+        template=PLOTLY_TEMPLATE, height=320, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.1), yaxis=dict(range=[-1.05, 1.05]),
         title=f'Signals — {composite}',
     )
@@ -294,7 +294,7 @@ def chart_projection(sim_latest: pd.DataFrame, price_actual: pd.DataFrame, signa
             fig.add_trace(go.Scatter(x=sim_latest['Horizon_Date'], y=sim_latest[pcol], name=f'Price ({scen})',
                                      line=dict(color=scen_colors[scen], width=1.4, dash='dash')), row=2, col=1)
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=1)
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=560, margin=dict(l=10, r=10, t=50, b=10),
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=400, margin=dict(l=10, r=10, t=50, b=10),
                       legend=dict(orientation='h', y=1.08))
     return fig
 
@@ -327,7 +327,7 @@ def chart_weekly_change(ind: pd.DataFrame, view: str):
     fig.add_trace(go.Bar(x=tues.index, y=d_lt, name='LT contribution', marker_color='#BA68C8'))
     fig.add_trace(go.Scatter(x=tues.index, y=d_tot, name=f'Total Δ{total_col}',
                              line=dict(color='#FFD54F', width=2), mode='lines+markers'))
-    fig.update_layout(barmode='relative', template=PLOTLY_TEMPLATE, height=420,
+    fig.update_layout(barmode='relative', template=PLOTLY_TEMPLATE, height=300,
                       margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation='h', y=1.1),
                       title=f'Weekly Change Decomposition ({view})')
     return fig
@@ -381,19 +381,8 @@ with tabs[0]:
     rows = [overview_row(s) for s in SHORTS]
     overview_df = pd.DataFrame(rows)
 
-    kpi_cols = st.columns(len(SHORTS))
-    for i, s in enumerate(SHORTS):
-        r = rows[i]
-        wall = r.get('WAll_Avg', np.nan)
-        delta = r.get('Δ WAll_Avg (1d)', np.nan)
-        with kpi_cols[i]:
-            st.markdown(kpi_card(
-                f"{s} — {INSTRUMENT_LABELS[s]}",
-                f"{wall:+.3f}" if pd.notna(wall) else 'n/a',
-                f"Δ1d {delta:+.3f}" if pd.notna(delta) else '',
-            ), unsafe_allow_html=True)
-
-    st.markdown('<div style="height:18px;"></div>', unsafe_allow_html=True)
+    # KPI cards folded into the table below (they showed the same WAll_Avg/Δ
+    # numbers redundantly) — one compact table instead of cards + table.
     st.markdown(
         html_table(overview_df, signed_cols=('ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg', 'Δ WAll_Avg (1d)')),
         unsafe_allow_html=True,
@@ -432,7 +421,7 @@ with tabs[2]:
         fig.add_trace(go.Scatter(x=ind.index, y=ind[composite_choice], name=s,
                                  line=dict(color=MKT_COLOR.get(s, None), width=1.6)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=520, margin=dict(l=10, r=10, t=30, b=10),
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=340, margin=dict(l=10, r=10, t=30, b=10),
                       legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-1.05, 1.05]))
     st.plotly_chart(fig, use_container_width=True, key='allsignals_chart')
 
