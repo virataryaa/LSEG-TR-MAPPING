@@ -450,7 +450,7 @@ def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
     for col in show_cols:
         fig.add_trace(go.Scatter(x=ind.index, y=ind[col] * 100, name=col, line=dict(width=0.8), opacity=0.35))
     fig.add_trace(go.Scatter(x=ind.index, y=ind[composite] * 100, name=composite,
-                             line=dict(color='#FFD54F', width=2.4)))
+                             line=dict(color='#1a237e', width=2.4)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(
         template=PLOTLY_TEMPLATE, height=320, margin=dict(l=10, r=10, t=30, b=10),
