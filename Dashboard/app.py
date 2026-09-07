@@ -194,13 +194,13 @@ def kpi_strip(items: list) -> str:
         return '#1b8a3d' if v > 0 else '#c62828' if v < 0 else '#555'
 
     cells = ''.join(
-        f'<span style="margin-right:20px;white-space:nowrap;">'
-        f'<span style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;">{label}</span> '
-        f'<span style="font-size:0.88rem;font-weight:700;color:{_color(v)};">{disp}</span></span>'
+        f'<span style="margin-right:14px;white-space:nowrap;">'
+        f'<span style="font-size:0.6rem;color:#999;text-transform:uppercase;letter-spacing:0.02em;">{label}</span> '
+        f'<span style="font-size:0.74rem;font-weight:700;color:{_color(v)};">{disp}</span></span>'
         for label, v, disp in items
     )
-    return (f'<div style="padding:6px 12px;background:#f7f8fa;border:1px solid #e0e0e0;'
-           f'border-radius:6px;margin-bottom:8px;">{cells}</div>')
+    return (f'<div style="padding:3px 10px;background:#f7f8fa;border:1px solid #e0e0e0;'
+           f'border-radius:5px;margin-bottom:6px;display:inline-block;">{cells}</div>')
 
 
 def section_header(title: str, subtitle: str = '') -> str:
@@ -754,12 +754,32 @@ st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
 st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
 
-tab_names = ['Overview', 'All Projections', 'All Signals', 'Instrument']
+# Monte Carlo path count and simulation run date — both global (sidebar) controls
+# now rather than per-tab widgets, since they only ever apply to whichever
+# instrument is selected above.
+st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+mc_n_paths = st.sidebar.number_input(
+    'Monte Carlo Paths (N)', min_value=50, max_value=500, value=200, step=50, key='mc_n_paths',
+    help='Number of bootstrapped price paths for the Monte Carlo signal bands '
+         '(Instrument tab -> Projection).',
+)
+
+_eff_for_picker = effective_source(selected_instrument, source_choice)
+_, _, _, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
+_run_dates_for_picker = (sorted(_sim_for_picker['Run_Date'].unique(), reverse=True)
+                        if not _sim_for_picker.empty else [])
+run_date_choice = (
+    st.sidebar.selectbox('Run Date', _run_dates_for_picker, index=0,
+                         format_func=lambda d: pd.Timestamp(d).date().isoformat(), key='run_date_picker')
+    if _run_dates_for_picker else None
+)
+
+tab_names = ['Instrument', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
 
-with tabs[0]:
+with tabs[1]:
     st.markdown(section_header(f'Overview — All Instruments ({source_choice})',
                                'Latest composite trend signals — Rollex rows fall back to GSCI for OJ'
                                if source_choice == 'Rollex' else
@@ -780,7 +800,7 @@ with tabs[0]:
 
 # ── All Projections tab ──────────────────────────────────────────────────────
 
-with tabs[1]:
+with tabs[2]:
     st.markdown(section_header('All Projections — Latest Simulation Run',
                                '10-business-day forward scenarios (up / down / unchanged) per instrument'),
                unsafe_allow_html=True)
@@ -803,7 +823,7 @@ with tabs[1]:
 
 # ── All Signals tab ──────────────────────────────────────────────────────────
 
-with tabs[2]:
+with tabs[3]:
     st.markdown(section_header('All Signals — CTA Signals per Instrument',
                                'Each instrument\'s own ST/MT/LT/All/WAll composites, stacked'),
                unsafe_allow_html=True)
@@ -826,7 +846,7 @@ with tabs[2]:
 # ── Instrument tab (driven by the sidebar slicer, not a tab per instrument) ────
 
 for short in [selected_instrument]:  # loops exactly once — keeps the body's indentation as-is
-    with tabs[3]:
+    with tabs[0]:
         eff = effective_source(short, source_choice)
         price, fut, ind, sim = get_instrument_data(short, eff)
         if ind.empty:
@@ -859,7 +879,7 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
 
         with sub_charts:
-            show_tues = st.checkbox('Show Tuesday lines', value=False, key=f'{short}_tues')
+            show_tues = False  # "Show Tuesday lines" checkbox hidden for now — add_tuesday_lines() kept in code to re-enable later
             # Same window applied to both price (GSCI) and fut (futures) so the
             # secondary-axis GSCI line doesn't fall out of sync with the
             # date-filtered primary line.
@@ -893,9 +913,11 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             else:
                 proj_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
                                        horizontal=True, key=f'{short}_projsignal')
+                # Run date + Monte Carlo path count are both sidebar (global)
+                # controls now — run_date_choice already defaults to the
+                # latest available run for this instrument.
                 run_dates = sorted(sim['Run_Date'].unique(), reverse=True)
-                run_choice = st.selectbox('Run date', run_dates, format_func=lambda d: pd.Timestamp(d).date().isoformat(),
-                                          key=f'{short}_rundate')
+                run_choice = run_date_choice if run_date_choice in run_dates else run_dates[0]
                 sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
 
                 show_mc = st.checkbox(
@@ -903,14 +925,14 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                     help='Bootstraps N random 10-day price paths from recent daily returns and '
                          'recomputes the full indicator set on each (all N paths at once, '
                          'vectorized) — gives a probabilistic p10-p90 / p25-p75 range instead of '
-                         'the 3 deterministic UP/DOWN/UNCH scenarios. Cached per run date.',
+                         'the 3 deterministic UP/DOWN/UNCH scenarios. N is set in the sidebar. '
+                         'Cached per run date.',
                 )
                 mc_bands = None
                 if show_mc and run_choice == run_dates[0]:
-                    n_paths = st.select_slider('Paths (N)', options=[50, 100, 200, 500], value=200, key=f'{short}_mc_n')
-                    with st.spinner(f'Running {n_paths} Monte Carlo paths for {short}/{eff}…'):
+                    with st.spinner(f'Running {mc_n_paths} Monte Carlo paths for {short}/{eff}…'):
                         last_date_str = ind.index.max().isoformat()
-                        mc_bands = get_monte_carlo_bands(short, eff, last_date_str, n_paths)
+                        mc_bands = get_monte_carlo_bands(short, eff, last_date_str, mc_n_paths)
                     if mc_bands.empty:
                         st.warning('Not enough history to run Monte Carlo for this instrument.')
                 elif show_mc:
