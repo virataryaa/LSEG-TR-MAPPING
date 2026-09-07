@@ -57,7 +57,7 @@ SIM_FILE      = DATA_DIR / 'sim_history.parquet'
 # READS its parquet output, never writes to it. BASE_DIR is CTA's own root, so
 # BASE_DIR.parent is the shared LSEG container folder.
 ROLLEX_DB_DIR = BASE_DIR.parent / 'Rollex' / 'Database'
-ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC'}  # Rollex has no OJ coverage
+ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC', 'LCC', 'LSU', 'RC'}  # Rollex has no OJ coverage
 
 # ── LSEG availability flag ─────────────────────────────────────────────────────
 
@@ -72,11 +72,11 @@ except ImportError:
 
 @dataclass
 class Instrument:
-    short:       str   # 'KC' — table key, display
-    gsci_ric:    str   # '.SPGSKCP' — GSCI index for historical price fetch
-    futures_ric: str   # 'KCv1' — front-month futures for display price history
-    decimals:    int   # price decimal places
-    label:       str   # 'Coffee'
+    short:       str          # 'KC' — table key, display
+    gsci_ric:    str | None   # '.SPGSKCP' — GSCI index for historical price fetch; None = no GSCI sub-index exists
+    futures_ric: str | None   # 'KCv1' — front-month futures for display price history; None = not fetched
+    decimals:    int          # price decimal places
+    label:       str          # 'Coffee'
 
 INSTRUMENTS = [
     Instrument('KC', '.SPGSKCP', 'KCv1', 0, 'Coffee'),
@@ -84,6 +84,12 @@ INSTRUMENTS = [
     Instrument('SB', '.SPGSSBP', 'SBv1', 1, 'Sugar'),
     Instrument('CC', '.SPGSCCP', 'CCv1', 0, 'Cocoa'),
     Instrument('OJ', '.SPGSOJP', 'OJv1', 1, 'Orange Juice'),
+    # Rollex-only — no S&P GSCI single-commodity sub-index exists for these
+    # London-listed ICE contracts, so gsci_ric/futures_ric are both None and
+    # the GSCI half of main()'s pipeline is skipped entirely for them.
+    Instrument('LCC', None, None, 0, 'London Cocoa'),
+    Instrument('LSU', None, None, 1, 'London Sugar'),
+    Instrument('RC',  None, None, 0, 'Robusta Coffee'),
 ]
 
 # ── Indicator parameter sets ───────────────────────────────────────────────────
@@ -712,33 +718,39 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
         for inst in INSTRUMENTS:
             print(f'\n=== {inst.short} ({inst.label}) ===')
 
-            # ── GSCI source (all 5 instruments) ────────────────────────────────
-            price_df = fetch_price_history(inst, full_refresh=full_refresh)
-            futures_df = fetch_futures_price_history(inst, full_refresh=full_refresh)
+            # ── GSCI source — only for instruments with a GSCI sub-index ───────
+            # (LCC/LSU/RC have no S&P GSCI single-commodity index at all —
+            # gsci_ric is None for them, so this whole block is skipped and
+            # they exist purely as Rollex-sourced instruments.)
+            if inst.gsci_ric:
+                price_df = fetch_price_history(inst, full_refresh=full_refresh)
+                futures_df = fetch_futures_price_history(inst, full_refresh=full_refresh)
 
-            ind_df = calculate_indicators(price_df)
-            upsert_indicators(inst, ind_df, source='GSCI')
-            print(f'  [{inst.short}/GSCI] indicators saved')
+                ind_df = calculate_indicators(price_df)
+                upsert_indicators(inst, ind_df, source='GSCI')
+                print(f'  [{inst.short}/GSCI] indicators saved')
 
-            backfill_sim_history(inst, price_df, futures_price_df=futures_df,
-                                 lookback_bdays=10, source='GSCI')
+                backfill_sim_history(inst, price_df, futures_price_df=futures_df,
+                                     lookback_bdays=10, source='GSCI')
 
-            try:
-                gsci_price    = float(price_df['CLOSE'].dropna().iloc[-1])
-                futures_price = (float(futures_df['CLOSE'].dropna().iloc[-1])
-                                 if not futures_df.empty else gsci_price)
-                daily_vol_pct = float(
-                    price_df['CLOSE'].pct_change().rolling(20).std().dropna().iloc[-1] * 100
-                )
-                print(f'  [{inst.short}/GSCI] gsci={gsci_price:.5g}  futures={futures_price:.5g}'
-                      f'  daily_vol={daily_vol_pct:.3f}%')
-                sim = build_simulation(price_df, gsci_price, daily_vol_pct,
-                                       display_price=futures_price)
-                append_sim_history(inst, sim, source='GSCI')
-            except Exception as e:
-                print(f'  [{inst.short}/GSCI] today\'s simulation error: {e}')
+                try:
+                    gsci_price    = float(price_df['CLOSE'].dropna().iloc[-1])
+                    futures_price = (float(futures_df['CLOSE'].dropna().iloc[-1])
+                                     if not futures_df.empty else gsci_price)
+                    daily_vol_pct = float(
+                        price_df['CLOSE'].pct_change().rolling(20).std().dropna().iloc[-1] * 100
+                    )
+                    print(f'  [{inst.short}/GSCI] gsci={gsci_price:.5g}  futures={futures_price:.5g}'
+                          f'  daily_vol={daily_vol_pct:.3f}%')
+                    sim = build_simulation(price_df, gsci_price, daily_vol_pct,
+                                           display_price=futures_price)
+                    append_sim_history(inst, sim, source='GSCI')
+                except Exception as e:
+                    print(f'  [{inst.short}/GSCI] today\'s simulation error: {e}')
+            else:
+                print(f'  [{inst.short}] no GSCI sub-index — Rollex-only instrument')
 
-            # ── Rollex source (KC/CT/SB/CC only — no OJ coverage) ──────────────
+            # ── Rollex source ────────────────────────────────────────────────
             if inst.short in ROLLEX_SHORTS:
                 rollex_df = fetch_rollex_price(inst)
                 if not rollex_df.empty:

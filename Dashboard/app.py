@@ -20,30 +20,41 @@ st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 # ── House palette / instrument config ───────────────────────────────────────────
 
 MKT_COLOR = {
-    'KC': '#3D3D3D',
-    'CT': '#909090',
-    'SB': '#64B5F6',
-    'CC': '#BF6B1A',
-    'OJ': '#E65100',
+    'KC':  '#3D3D3D',
+    'CT':  '#909090',
+    'SB':  '#64B5F6',
+    'CC':  '#BF6B1A',
+    'OJ':  '#E65100',
+    'LCC': '#8D6E63',
+    'LSU': '#26A69A',
+    'RC':  '#6D4C41',
 }
 
-PRICE_DECIMALS = {'KC': 2, 'CT': 2, 'SB': 2, 'CC': 0, 'OJ': 2}
+PRICE_DECIMALS = {'KC': 2, 'CT': 2, 'SB': 2, 'CC': 0, 'OJ': 2, 'LCC': 0, 'LSU': 1, 'RC': 0}
 
 INSTRUMENT_LABELS = {
     'KC': 'Coffee', 'CT': 'Cotton', 'SB': 'Sugar', 'CC': 'Cocoa', 'OJ': 'Orange Juice',
+    'LCC': 'London Cocoa', 'LSU': 'London Sugar', 'RC': 'Robusta Coffee',
 }
-SHORTS = ['KC', 'CT', 'SB', 'CC', 'OJ']
+SHORTS = ['KC', 'CT', 'SB', 'CC', 'OJ', 'LCC', 'LSU', 'RC']
 
-# Rollex (this desk's own continuous roll-adjusted futures price) covers only
-# KC/CT/SB/CC — no OJ. See Code/tr_mapping_fetch.py's module docstring for the
-# full GSCI-vs-Rollex rationale.
-ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC'}
+# Rollex (this desk's own continuous roll-adjusted futures price) covers
+# KC/CT/SB/CC/LCC/LSU/RC — no OJ. GSCI_SHORTS is the opposite gap: LCC/LSU/RC
+# have no S&P GSCI single-commodity sub-index at all, so they exist as
+# Rollex-only instruments. See Code/tr_mapping_fetch.py's module docstring.
+ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC', 'LCC', 'LSU', 'RC'}
+GSCI_SHORTS = {'KC', 'CT', 'SB', 'CC', 'OJ'}
 
 
 def effective_source(short: str, source_choice: str) -> str:
-    """Rollex has no OJ coverage — fall back to GSCI for OJ regardless of the
-    sidebar toggle, rather than showing an empty/broken tab."""
-    return 'GSCI' if (source_choice == 'Rollex' and short not in ROLLEX_SHORTS) else source_choice
+    """Falls forward/back to whichever source the instrument actually has
+    data for, rather than showing an empty/broken tab: OJ has no Rollex (falls
+    back to GSCI), LCC/LSU/RC have no GSCI (fall forward to Rollex)."""
+    if source_choice == 'Rollex' and short not in ROLLEX_SHORTS:
+        return 'GSCI'
+    if source_choice == 'GSCI' and short not in GSCI_SHORTS:
+        return 'Rollex'
+    return source_choice
 
 ST_COLS_PREFIX = ('Mom_5', 'Mom_10', 'Mom_15', 'Mom_20', 'Mom_25')  # not used directly — full lists loaded from indicators columns
 
@@ -62,8 +73,22 @@ PLOTLY_TEMPLATE = 'plotly_white'
 
 # ── Data loading (cached) ────────────────────────────────────────────────────────
 
+_DATA_FILES = ['price_history.parquet', 'futures_price.parquet', 'indicators.parquet', 'sim_history.parquet']
+
+
+def _data_signature() -> tuple:
+    """File mtimes, passed into load_all() so st.cache_data actually invalidates
+    when the parquet files change on disk. @st.cache_data's key is normally
+    just the function's own bytecode + arguments — a redeploy that updates the
+    *data* files (via git pull) without touching load_all()'s source would
+    otherwise keep serving the stale cached DataFrames for up to the TTL (or
+    until the process restarts), which is exactly what caused a KeyError on a
+    'Source' column that only existed in the newly-pushed parquet."""
+    return tuple((DATA_DIR / f).stat().st_mtime if (DATA_DIR / f).exists() else 0 for f in _DATA_FILES)
+
+
 @st.cache_data(ttl=3600)
-def load_all():
+def load_all(_signature: tuple):
     price_df = pd.read_parquet(DATA_DIR / 'price_history.parquet')
     price_df['Date'] = pd.to_datetime(price_df['Date'])
 
@@ -77,10 +102,16 @@ def load_all():
     sim_df['Run_Date'] = pd.to_datetime(sim_df['Run_Date'])
     sim_df['Horizon_Date'] = pd.to_datetime(sim_df['Horizon_Date'])
 
+    # Defensive backward-compat: older cached/on-disk data without the Source
+    # column (pre-Rollex) is treated as GSCI rather than crashing downstream.
+    for df in (price_df, ind_df, sim_df):
+        if 'Source' not in df.columns:
+            df.insert(1, 'Source', 'GSCI')
+
     return price_df, fut_df, ind_df, sim_df
 
 
-price_all, fut_all, ind_all, sim_all = load_all()
+price_all, fut_all, ind_all, sim_all = load_all(_data_signature())
 
 if ind_all.empty:
     st.error('No indicator data found in Database/indicators.parquet. Run Code/tr_mapping_fetch.py first.')
@@ -595,7 +626,12 @@ def overview_row(short: str, source: str) -> dict:
     if ind.empty:
         return {'Commodity': short, 'Label': INSTRUMENT_LABELS.get(short, short)}
     last = ind.iloc[-1]
-    fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
+    # Rollex's own price doubles as the display price (see chart_price()); GSCI
+    # mode uses the separate raw futures_price table.
+    if eff == 'Rollex':
+        fut_last = price['CLOSE'].iloc[-1] if not price.empty else np.nan
+    else:
+        fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
 
     all_v = _safe_val(ind['All_Avg'])
     chg1d  = (_safe_val(ind['WAll_Avg']) - _safe_val(ind['WAll_Avg'], 1)) if 'WAll_Avg' in ind.columns else np.nan
@@ -647,6 +683,8 @@ source_choice = st.sidebar.radio(
 )
 if source_choice == 'Rollex':
     st.sidebar.caption('Rollex has no OJ coverage — the OJ tab falls back to GSCI.')
+else:
+    st.sidebar.caption('GSCI has no LCC/LSU/RC coverage — those tabs fall forward to Rollex.')
 
 last_update = ind_all.loc[ind_all['Source'] == 'GSCI', 'Date'].max()
 st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
@@ -691,7 +729,7 @@ with tabs[1]:
             continue
         latest_run = sim['Run_Date'].max()
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
-        fallback_note = '  *(GSCI — no Rollex coverage)*' if eff != source_choice else ''
+        fallback_note = f'  *(showing {eff} — no {source_choice} coverage)*' if eff != source_choice else ''
         st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()}){fallback_note}")
         col_chart, col_table = st.columns([7, 5])
         with col_chart:
@@ -715,8 +753,8 @@ with tabs[2]:
         if ind.empty:
             continue
         ind_ranged = date_range_filter(ind, f'allsig_{s}')
-        fallback_note = ('<span style="color:#c62828;margin-left:6px;font-size:0.72rem;">'
-                         '(GSCI — no Rollex coverage)</span>') if eff != source_choice else ''
+        fallback_note = (f'<span style="color:#c62828;margin-left:6px;font-size:0.72rem;">'
+                         f'(showing {eff} — no {source_choice} coverage)</span>') if eff != source_choice else ''
         st.markdown(
             f'<div style="border-bottom:2px solid {MKT_COLOR.get(s, "#333")};padding-bottom:3px;margin:6px 0;">'
             f'<span style="font-weight:700;color:{MKT_COLOR.get(s, "#333")};">{s}</span>'
@@ -742,7 +780,7 @@ for i, short in enumerate(SHORTS):
             fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
             subtitle = f'Futures: {fmt_price(short, fut_last)}  |  GSCI-based trend signal'
         if eff != source_choice:
-            subtitle += '  (Rollex has no OJ coverage — showing GSCI)'
+            subtitle += f'  (no {source_choice} coverage for {short} — showing {eff})'
         st.markdown(section_header(f'{short} — {INSTRUMENT_LABELS[short]}', subtitle),
                    unsafe_allow_html=True)
 
