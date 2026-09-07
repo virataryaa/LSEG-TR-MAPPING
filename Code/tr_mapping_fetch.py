@@ -7,12 +7,25 @@ the previous day's close.  No intraday fetching.
 
 Storage: parquet files under Database/ (Hardminer architecture — was DuckDB in the
 original "TR mapping old" version this was converted from):
-    Database/price_history.parquet   Commodity, Date, Close   (GSCI index — signal basis)
-    Database/futures_price.parquet   Commodity, Date, Close   (front-month futures — display)
-    Database/indicators.parquet      Commodity, Date, <172 signal/composite columns>
-    Database/sim_history.parquet     Commodity, Run_Date, Horizon_Date, Horizon_Day,
+    Database/price_history.parquet   Commodity, Source, Date, Close   (signal basis)
+    Database/futures_price.parquet   Commodity, Date, Close   (front-month futures — display,
+                                      GSCI-mode only; Rollex mode displays its own price)
+    Database/indicators.parquet      Commodity, Source, Date, <172 signal/composite columns>
+    Database/sim_history.parquet     Commodity, Source, Run_Date, Horizon_Date, Horizon_Day,
                                       ST/MT/LT/All/WAll _down/_up/_unch, price_down/up/unch,
                                       Actual_Close
+
+Two signal sources per instrument, selectable in the dashboard:
+    GSCI   — S&P GSCI single-commodity sub-index (.SPGSKCP etc), all 5 instruments,
+             history from ~2006. Matches Romain's original methodology exactly.
+    Rollex — this desk's own continuous roll-adjusted futures price (rollex_px),
+             read directly from the sibling LSEG-Rollex project's own parquet
+             output (cross-repo read, no re-fetch — Rollex maintains its own
+             data). Only KC/CT/SB/CC are covered (Rollex has no OJ); history
+             from ~2010. Same 144-indicator math applies unchanged — it's
+             return/crossing-based, so it's source-agnostic — but the actual
+             signal VALUES differ between sources because GSCI's and Rollex's
+             roll methodologies differ.
 
 Usage:
     python tr_mapping_fetch.py                    # incremental update (run next morning)
@@ -39,6 +52,12 @@ PRICE_FILE    = DATA_DIR / 'price_history.parquet'
 FUTPX_FILE    = DATA_DIR / 'futures_price.parquet'
 IND_FILE      = DATA_DIR / 'indicators.parquet'
 SIM_FILE      = DATA_DIR / 'sim_history.parquet'
+
+# Rollex is a sibling LSEG-* project (own repo, own automator) — CTA only ever
+# READS its parquet output, never writes to it. BASE_DIR is CTA's own root, so
+# BASE_DIR.parent is the shared LSEG container folder.
+ROLLEX_DB_DIR = BASE_DIR.parent / 'Rollex' / 'Database'
+ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC'}  # Rollex has no OJ coverage
 
 # ── LSEG availability flag ─────────────────────────────────────────────────────
 
@@ -146,16 +165,17 @@ def _load(path: pathlib.Path) -> pd.DataFrame:
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
-def upsert_price_history(inst: Instrument, new_df: pd.DataFrame) -> None:
+def upsert_price_history(inst: Instrument, new_df: pd.DataFrame, source: str = 'GSCI') -> None:
     """new_df: DataFrame with DatetimeIndex named Date, column CLOSE."""
     rows = new_df.reset_index()[['Date', 'CLOSE']].copy()
     rows.columns = ['Date', 'Close']
+    rows.insert(0, 'Source', source)
     rows.insert(0, 'Commodity', inst.short)
     rows = rows.dropna(subset=['Close'])
     old = _load(PRICE_FILE)
     combined = pd.concat([old, rows], ignore_index=True) if not old.empty else rows
-    combined = combined.drop_duplicates(subset=['Commodity', 'Date'], keep='last')
-    combined = combined.sort_values(['Commodity', 'Date']).reset_index(drop=True)
+    combined = combined.drop_duplicates(subset=['Commodity', 'Source', 'Date'], keep='last')
+    combined = combined.sort_values(['Commodity', 'Source', 'Date']).reset_index(drop=True)
     combined.to_parquet(PRICE_FILE, index=False)
 
 
@@ -171,13 +191,14 @@ def upsert_futures_price(inst: Instrument, new_df: pd.DataFrame) -> None:
     combined.to_parquet(FUTPX_FILE, index=False)
 
 
-def load_price_history(inst: Instrument) -> pd.DataFrame:
-    """Load full price history for an instrument. Returns DataFrame indexed by
-    Date (named 'Date') with a single 'CLOSE' column, matching original DuckDB shape."""
+def load_price_history(inst: Instrument, source: str = 'GSCI') -> pd.DataFrame:
+    """Load full price history for an instrument+source. Returns DataFrame
+    indexed by Date (named 'Date') with a single 'CLOSE' column, matching
+    original DuckDB shape."""
     all_df = _load(PRICE_FILE)
     if all_df.empty:
         return pd.DataFrame(columns=['CLOSE'])
-    df = all_df[all_df['Commodity'] == inst.short][['Date', 'Close']].copy()
+    df = all_df[(all_df['Commodity'] == inst.short) & (all_df['Source'] == source)][['Date', 'Close']].copy()
     df['Date'] = pd.to_datetime(df['Date'])
     df = df.sort_values('Date').set_index('Date')
     df.index.name = 'Date'
@@ -185,32 +206,34 @@ def load_price_history(inst: Instrument) -> pd.DataFrame:
     return df
 
 
-def get_last_price_date(inst: Instrument):
+def get_last_price_date(inst: Instrument, source: str = 'GSCI'):
     all_df = _load(PRICE_FILE)
     if all_df.empty:
         return None
-    sub = all_df[all_df['Commodity'] == inst.short]
+    sub = all_df[(all_df['Commodity'] == inst.short) & (all_df['Source'] == source)]
     if sub.empty:
         return None
     return pd.Timestamp(pd.to_datetime(sub['Date']).max())
 
 
-def upsert_indicators(inst: Instrument, df: pd.DataFrame) -> None:
-    """Replace all indicator rows for this instrument. df: DatetimeIndex named
-    Date, columns = CLOSE + all signal/composite columns (CLOSE is dropped —
-    it's already in price_history)."""
+def upsert_indicators(inst: Instrument, df: pd.DataFrame, source: str = 'GSCI') -> None:
+    """Replace all indicator rows for this instrument+source. df: DatetimeIndex
+    named Date, columns = CLOSE + all signal/composite columns (CLOSE is
+    dropped — it's already in price_history)."""
     rows = df.reset_index().copy()
     rows = rows.rename(columns={'index': 'Date'})
+    rows.insert(0, 'Source', source)
     rows.insert(0, 'Commodity', inst.short)
     signal_cols = [c for c in df.columns if c != 'CLOSE']
-    rows = rows[['Commodity', 'Date'] + signal_cols].copy()
+    rows = rows[['Commodity', 'Source', 'Date'] + signal_cols].copy()
     old = _load(IND_FILE)
     if old.empty:
         combined = rows
     else:
-        old = old[old['Commodity'] != inst.short]  # full replace for this instrument
+        # full replace for this instrument+source only
+        old = old[~((old['Commodity'] == inst.short) & (old['Source'] == source))]
         combined = pd.concat([old, rows], ignore_index=True)
-    combined = combined.sort_values(['Commodity', 'Date']).reset_index(drop=True)
+    combined = combined.sort_values(['Commodity', 'Source', 'Date']).reset_index(drop=True)
     combined.to_parquet(IND_FILE, index=False)
 
 
@@ -377,8 +400,9 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ── Fetch ──────────────────────────────────────────────────────────────────────
 
 def fetch_price_history(inst: Instrument, full_refresh: bool = False) -> pd.DataFrame:
-    """Fetch GSCI price history, maintaining incremental parquet cache."""
-    last_date = None if full_refresh else get_last_price_date(inst)
+    """Fetch GSCI price history (Source='GSCI'), maintaining incremental parquet cache."""
+    source = 'GSCI'
+    last_date = None if full_refresh else get_last_price_date(inst, source)
 
     if LSEG_AVAILABLE:
         end_str = (date.today() + timedelta(days=1)).isoformat()
@@ -395,7 +419,7 @@ def fetch_price_history(inst: Instrument, full_refresh: bool = False) -> pd.Data
                     new.index = pd.to_datetime(new.index)
                     new = new[new.index.dayofweek < 5]
                     new.index.name = 'Date'
-                    upsert_price_history(inst, new)
+                    upsert_price_history(inst, new, source=source)
             except Exception as e:
                 print(f'  [{inst.short}] incremental fetch error: {e} — using cached data')
         else:
@@ -412,20 +436,45 @@ def fetch_price_history(inst: Instrument, full_refresh: bool = False) -> pd.Data
                 combined.index = pd.to_datetime(combined.index)
                 combined = combined[combined.index.dayofweek < 5]
                 combined.index.name = 'Date'
-                upsert_price_history(inst, combined)
+                upsert_price_history(inst, combined, source=source)
             except Exception as e:
                 print(f'  [{inst.short}] full fetch error: {e}')
-                if get_last_price_date(inst) is None:
+                if get_last_price_date(inst, source) is None:
                     raise
                 print(f'  [{inst.short}] falling back to cached parquet data')
     else:
-        if get_last_price_date(inst) is None:
+        if get_last_price_date(inst, source) is None:
             raise RuntimeError(f'LSEG not available and no cached data for {inst.short}')
         print(f'  [{inst.short}] LSEG unavailable — loading cached parquet data')
 
-    price_df = load_price_history(inst)
-    print(f'  [{inst.short}] price history: {len(price_df)} rows, last={price_df.index.max().date()}')
+    price_df = load_price_history(inst, source)
+    print(f'  [{inst.short}] GSCI price history: {len(price_df)} rows, last={price_df.index.max().date()}')
     return price_df
+
+
+def fetch_rollex_price(inst: Instrument) -> pd.DataFrame:
+    """Read the sibling LSEG-Rollex project's continuous roll-adjusted price
+    (rollex_px) directly from its own parquet — CTA never fetches or writes
+    this itself, Rollex's own automator keeps it current. Returns a DataFrame
+    indexed by Date with a single CLOSE column, or empty if unavailable."""
+    path = ROLLEX_DB_DIR / f'rollex_{inst.short}.parquet'
+    if not path.exists():
+        print(f'  [{inst.short}] Rollex file not found at {path} — skipping Rollex source')
+        return pd.DataFrame(columns=['CLOSE'])
+    try:
+        raw = pd.read_parquet(path, columns=['rollex_px'])
+    except Exception as e:
+        print(f'  [{inst.short}] Rollex read error: {e} — skipping Rollex source')
+        return pd.DataFrame(columns=['CLOSE'])
+    df = raw.rename(columns={'rollex_px': 'CLOSE'}).dropna()
+    df.index = pd.to_datetime(df.index)
+    df.index.name = 'Date'
+    df = df.sort_index()
+    if not df.empty:
+        upsert_price_history(inst, df, source='Rollex')
+    print(f'  [{inst.short}] Rollex price history: {len(df)} rows, '
+          f'last={df.index.max().date() if not df.empty else "n/a"}')
+    return df
 
 
 def fetch_futures_price_history(inst: Instrument, full_refresh: bool = False) -> pd.DataFrame:
@@ -516,11 +565,12 @@ def build_simulation(
 
 # ── Simulation history ────────────────────────────────────────────────────────
 
-def _sim_to_rows(inst: Instrument, run_date: pd.Timestamp, sim: pd.DataFrame) -> list[dict]:
+def _sim_to_rows(inst: Instrument, run_date: pd.Timestamp, sim: pd.DataFrame, source: str = 'GSCI') -> list[dict]:
     rows = []
     for day_idx, (horizon_date, row) in enumerate(sim.iterrows(), start=1):
         rows.append({
             'Commodity':    inst.short,
+            'Source':       source,
             'Run_Date':     run_date,
             'Horizon_Date': pd.Timestamp(horizon_date),
             'Horizon_Day':  day_idx,
@@ -542,7 +592,9 @@ def _sim_to_rows(inst: Instrument, run_date: pd.Timestamp, sim: pd.DataFrame) ->
 
 
 def _backfill_actual_close(sim_df: pd.DataFrame, price_df_all: pd.DataFrame) -> pd.DataFrame:
-    """Fill Actual_Close for past horizon dates using price_history (as-of backward join)."""
+    """Fill Actual_Close for past horizon dates using price_history (as-of
+    backward join), matched on both Commodity AND Source — a Rollex-sourced
+    sim row must be backfilled from Rollex prices, not GSCI, and vice versa."""
     if sim_df.empty or price_df_all.empty:
         return sim_df
     price_df_all = price_df_all.copy()
@@ -550,11 +602,11 @@ def _backfill_actual_close(sim_df: pd.DataFrame, price_df_all: pd.DataFrame) -> 
     needs_fill = sim_df['Actual_Close'].isna() & (sim_df['Horizon_Date'] <= pd.Timestamp(date.today()))
     if not needs_fill.any():
         return sim_df
-    for inst_short in sim_df.loc[needs_fill, 'Commodity'].unique():
-        px = price_df_all[price_df_all['Commodity'] == inst_short].sort_values('Date')
+    for inst_short, src in sim_df.loc[needs_fill, ['Commodity', 'Source']].drop_duplicates().itertuples(index=False):
+        px = price_df_all[(price_df_all['Commodity'] == inst_short) & (price_df_all['Source'] == src)].sort_values('Date')
         if px.empty:
             continue
-        mask = needs_fill & (sim_df['Commodity'] == inst_short)
+        mask = needs_fill & (sim_df['Commodity'] == inst_short) & (sim_df['Source'] == src)
         for idx in sim_df.index[mask]:
             hdate = sim_df.at[idx, 'Horizon_Date']
             eligible = px[px['Date'] <= hdate]
@@ -563,30 +615,32 @@ def _backfill_actual_close(sim_df: pd.DataFrame, price_df_all: pd.DataFrame) -> 
     return sim_df
 
 
-def append_sim_history(inst: Instrument, sim: pd.DataFrame) -> None:
+def append_sim_history(inst: Instrument, sim: pd.DataFrame, source: str = 'GSCI') -> None:
     """Append today's simulation to sim_history (idempotent — replaces if re-run today)."""
     today = pd.Timestamp(date.today())
     old = _load(SIM_FILE)
     if not old.empty:
-        old = old[~((old['Commodity'] == inst.short) & (old['Run_Date'] == today))]
-    new_rows = pd.DataFrame(_sim_to_rows(inst, today, sim))
+        old = old[~((old['Commodity'] == inst.short) & (old['Source'] == source) & (old['Run_Date'] == today))]
+    new_rows = pd.DataFrame(_sim_to_rows(inst, today, sim, source=source))
     combined = pd.concat([old, new_rows], ignore_index=True) if not old.empty else new_rows
     combined = _backfill_actual_close(combined, _load(PRICE_FILE))
-    combined = combined.sort_values(['Commodity', 'Run_Date', 'Horizon_Day']).reset_index(drop=True)
+    combined = combined.sort_values(['Commodity', 'Source', 'Run_Date', 'Horizon_Day']).reset_index(drop=True)
     combined.to_parquet(SIM_FILE, index=False)
-    count = (combined['Commodity'] == inst.short).sum()
-    print(f'  [{inst.short}] sim history: {count} rows total')
+    count = ((combined['Commodity'] == inst.short) & (combined['Source'] == source)).sum()
+    print(f'  [{inst.short}/{source}] sim history: {count} rows total')
 
 
 def backfill_sim_history(
     inst: Instrument, price_df: pd.DataFrame, futures_price_df: pd.DataFrame = None,
-    lookback_bdays: int = 10,
+    lookback_bdays: int = 10, source: str = 'GSCI',
 ) -> None:
     """Compute simulations for any of the last `lookback_bdays` business days not yet stored."""
     sim_all = _load(SIM_FILE)
     if not sim_all.empty:
         already_run = set(
-            pd.to_datetime(sim_all.loc[sim_all['Commodity'] == inst.short, 'Run_Date']).dt.normalize()
+            pd.to_datetime(sim_all.loc[
+                (sim_all['Commodity'] == inst.short) & (sim_all['Source'] == source), 'Run_Date'
+            ]).dt.normalize()
         )
     else:
         already_run = set()
@@ -617,24 +671,24 @@ def backfill_sim_history(
             sim = build_simulation(slice_df, float(gsci_price), float(vol_pct),
                                    display_price=display_price)
         except Exception as e:
-            print(f'  [{inst.short}] backfill error on {run_date.date()}: {e}')
+            print(f'  [{inst.short}/{source}] backfill error on {run_date.date()}: {e}')
             continue
 
-        all_rows.extend(_sim_to_rows(inst, pd.Timestamp(run_date), sim))
-        print(f'  [{inst.short}] backfilled {run_date.date()}')
+        all_rows.extend(_sim_to_rows(inst, pd.Timestamp(run_date), sim, source=source))
+        print(f'  [{inst.short}/{source}] backfilled {run_date.date()}')
 
     if not all_rows:
-        print(f'  [{inst.short}] backfill: nothing new to add')
+        print(f'  [{inst.short}/{source}] backfill: nothing new to add')
         return
 
     new_df = pd.DataFrame(all_rows)
     old = _load(SIM_FILE)
     combined = pd.concat([old, new_df], ignore_index=True) if not old.empty else new_df
     combined = _backfill_actual_close(combined, _load(PRICE_FILE))
-    combined = combined.sort_values(['Commodity', 'Run_Date', 'Horizon_Day']).reset_index(drop=True)
+    combined = combined.sort_values(['Commodity', 'Source', 'Run_Date', 'Horizon_Day']).reset_index(drop=True)
     combined.to_parquet(SIM_FILE, index=False)
-    count = (combined['Commodity'] == inst.short).sum()
-    print(f'  [{inst.short}] backfill done: {len(all_rows) // 10} new dates, {count} total rows')
+    count = ((combined['Commodity'] == inst.short) & (combined['Source'] == source)).sum()
+    print(f'  [{inst.short}/{source}] backfill done: {len(all_rows) // 10} new dates, {count} total rows')
 
 
 def reset_sim_history() -> None:
@@ -658,14 +712,16 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
         for inst in INSTRUMENTS:
             print(f'\n=== {inst.short} ({inst.label}) ===')
 
+            # ── GSCI source (all 5 instruments) ────────────────────────────────
             price_df = fetch_price_history(inst, full_refresh=full_refresh)
             futures_df = fetch_futures_price_history(inst, full_refresh=full_refresh)
 
             ind_df = calculate_indicators(price_df)
-            upsert_indicators(inst, ind_df)
-            print(f'  [{inst.short}] indicators saved')
+            upsert_indicators(inst, ind_df, source='GSCI')
+            print(f'  [{inst.short}/GSCI] indicators saved')
 
-            backfill_sim_history(inst, price_df, futures_price_df=futures_df, lookback_bdays=10)
+            backfill_sim_history(inst, price_df, futures_price_df=futures_df,
+                                 lookback_bdays=10, source='GSCI')
 
             try:
                 gsci_price    = float(price_df['CLOSE'].dropna().iloc[-1])
@@ -674,13 +730,38 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
                 daily_vol_pct = float(
                     price_df['CLOSE'].pct_change().rolling(20).std().dropna().iloc[-1] * 100
                 )
-                print(f'  [{inst.short}] gsci={gsci_price:.5g}  futures={futures_price:.5g}'
+                print(f'  [{inst.short}/GSCI] gsci={gsci_price:.5g}  futures={futures_price:.5g}'
                       f'  daily_vol={daily_vol_pct:.3f}%')
                 sim = build_simulation(price_df, gsci_price, daily_vol_pct,
                                        display_price=futures_price)
-                append_sim_history(inst, sim)
+                append_sim_history(inst, sim, source='GSCI')
             except Exception as e:
-                print(f'  [{inst.short}] today\'s simulation error: {e}')
+                print(f'  [{inst.short}/GSCI] today\'s simulation error: {e}')
+
+            # ── Rollex source (KC/CT/SB/CC only — no OJ coverage) ──────────────
+            if inst.short in ROLLEX_SHORTS:
+                rollex_df = fetch_rollex_price(inst)
+                if not rollex_df.empty:
+                    rollex_ind_df = calculate_indicators(rollex_df)
+                    upsert_indicators(inst, rollex_ind_df, source='Rollex')
+                    print(f'  [{inst.short}/Rollex] indicators saved')
+
+                    # No separate display-price fetch for Rollex — rollex_px IS
+                    # the display price too (already continuous/roll-adjusted).
+                    backfill_sim_history(inst, rollex_df, futures_price_df=rollex_df,
+                                         lookback_bdays=10, source='Rollex')
+
+                    try:
+                        rollex_price = float(rollex_df['CLOSE'].dropna().iloc[-1])
+                        rollex_vol_pct = float(
+                            rollex_df['CLOSE'].pct_change().rolling(20).std().dropna().iloc[-1] * 100
+                        )
+                        print(f'  [{inst.short}/Rollex] price={rollex_price:.5g}  daily_vol={rollex_vol_pct:.3f}%')
+                        rollex_sim = build_simulation(rollex_df, rollex_price, rollex_vol_pct,
+                                                      display_price=rollex_price)
+                        append_sim_history(inst, rollex_sim, source='Rollex')
+                    except Exception as e:
+                        print(f'  [{inst.short}/Rollex] today\'s simulation error: {e}')
 
     finally:
         if LSEG_AVAILABLE:
