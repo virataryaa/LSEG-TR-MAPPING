@@ -560,8 +560,14 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
     # lines and the Actual line render on top of them.
     if mc_bands is not None and not mc_bands.empty and signal_col in ('ST', 'MT', 'LT', 'All', 'WAll'):
         mc = mc_bands
-        p10, p25, p50, p75, p90 = (mc[f'{signal_col}_{p}'] * 100 for p in ('p10', 'p25', 'p50', 'p75', 'p90'))
-        x_mc = mc['Horizon_Date']
+        # Prepend the anchor point (same value on every percentile, converging
+        # to a single point) so the band starts exactly where "Actual" ends
+        # instead of a visible gap between the two.
+        x_mc = [anchor_date] + list(mc['Horizon_Date'])
+        p10, p25, p50, p75, p90 = (
+            [last_sig_val] + (mc[f'{signal_col}_{p}'] * 100).tolist()
+            for p in ('p10', 'p25', 'p50', 'p75', 'p90')
+        )
         # mode='lines' is required on every one of these — Plotly defaults a
         # Scatter trace to 'lines+markers' when it has under ~20 points (our
         # 10-day horizon always does), so without it each band-boundary trace
@@ -952,14 +958,3 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                 st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
                                 width='stretch', key=f'{short}_projchart')
                 st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)
-
-                st.caption(
-                    'Actual Close (backfilled outcome for past horizon dates) — not part of the '
-                    'original Dash table, shown here for a quick projection-vs-actual check.'
-                )
-                actual_tbl = sim_sel[['Horizon_Date', 'Horizon_Day', 'Actual_Close']].copy()
-                actual_tbl['Horizon_Date'] = actual_tbl['Horizon_Date'].dt.date
-                st.markdown(
-                    html_table(actual_tbl, decimals=1),
-                    unsafe_allow_html=True,
-                )
