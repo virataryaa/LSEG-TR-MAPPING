@@ -375,34 +375,32 @@ def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str =
 
 
 def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
-    """Compact date-range control: radio for quick ranges + two independent
-    From/To calendar widgets for Custom. Returns (start_ts, end_ts) rather than
-    a filtered frame so the same window can be applied to more than one
-    DataFrame (e.g. price + futures) without desyncing them.
+    """Sidebar date-range control: radio for quick ranges + two independent
+    From/To calendar widgets for Custom, stacked vertically (sidebar is narrow
+    — no st.columns). One global control instead of a separate picker on every
+    Charts/Weekly Change/All Signals view; returns (start_ts, end_ts) rather
+    than a filtered frame so it can be applied to several DataFrames (price,
+    futures, indicators, ...) without desyncing them.
 
     Two separate single-date st.date_input widgets (not one range-mode widget)
     — a range-mode date_input returns a single date instead of a 2-tuple until
     both ends are picked, which crashed the unpack here before; two single-date
     pickers sidestep that entirely since each always returns exactly one date."""
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        choice = st.radio(
-            'Date range', ['1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
-            index=2, horizontal=True, key=f'{key_prefix}_range',
-        )
+    choice = st.sidebar.radio(
+        'Date range', ['1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
+        index=2, horizontal=True, key=f'{key_prefix}_range',
+    )
     max_date = pd.Timestamp(df.index.max())
     min_date = pd.Timestamp(df.index.min())
     if choice == 'Custom':
-        with c2:
-            start = st.date_input(
-                'From', value=(max_date - pd.Timedelta(days=365)).date(),
-                min_value=min_date, max_value=max_date, key=f'{key_prefix}_from',
-            )
-        with c3:
-            end = st.date_input(
-                'To', value=max_date.date(),
-                min_value=min_date, max_value=max_date, key=f'{key_prefix}_to',
-            )
+        start = st.sidebar.date_input(
+            'From', value=(max_date - pd.Timedelta(days=365)).date(),
+            min_value=min_date, max_value=max_date, key=f'{key_prefix}_from',
+        )
+        end = st.sidebar.date_input(
+            'To', value=max_date.date(),
+            min_value=min_date, max_value=max_date, key=f'{key_prefix}_to',
+        )
         start, end = pd.Timestamp(start), pd.Timestamp(end)
         if start > end:
             start, end = end, start
@@ -417,10 +415,6 @@ def apply_range(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.
     return df.loc[(df.index >= start) & (df.index <= end)]
 
 
-def date_range_filter(df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
-    """Single-DataFrame convenience wrapper around get_date_range()+apply_range()."""
-    start, end = get_date_range(df, key_prefix)
-    return apply_range(df, start, end)
 
 
 def add_tuesday_lines(fig: go.Figure, idx: pd.DatetimeIndex, row=None, col=None):
@@ -754,9 +748,29 @@ st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
 st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
 
-# Monte Carlo path count and simulation run date — both global (sidebar) controls
-# now rather than per-tab widgets, since they only ever apply to whichever
-# instrument is selected above.
+_eff_for_picker = effective_source(selected_instrument, source_choice)
+_, _, _ind_for_picker, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
+
+# Date range — one global (sidebar) control instead of a separate picker on
+# each of the Charts/Weekly Change/All Signals sub-views (every instrument's
+# usable range is roughly the same anyway). Bounds come from whichever
+# instrument is currently selected.
+st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+if not _ind_for_picker.empty:
+    sidebar_rng_start, sidebar_rng_end = get_date_range(_ind_for_picker, 'sidebar_daterange')
+else:
+    sidebar_rng_start, sidebar_rng_end = None, None
+
+
+def apply_sidebar_range(df: pd.DataFrame) -> pd.DataFrame:
+    if sidebar_rng_start is None or df.empty:
+        return df
+    return apply_range(df, sidebar_rng_start, sidebar_rng_end)
+
+
+# Monte Carlo path count and simulation run date — both global (sidebar)
+# controls too, rather than per-tab widgets, since they only ever apply to
+# whichever instrument is selected above.
 st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 mc_n_paths = st.sidebar.number_input(
     'Monte Carlo Paths (N)', min_value=50, max_value=500, value=200, step=50, key='mc_n_paths',
@@ -764,8 +778,6 @@ mc_n_paths = st.sidebar.number_input(
          '(Instrument tab -> Projection).',
 )
 
-_eff_for_picker = effective_source(selected_instrument, source_choice)
-_, _, _, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
 _run_dates_for_picker = (sorted(_sim_for_picker['Run_Date'].unique(), reverse=True)
                         if not _sim_for_picker.empty else [])
 run_date_choice = (
@@ -832,7 +844,7 @@ with tabs[3]:
         _, _, ind, _ = get_instrument_data(s, eff)
         if ind.empty:
             continue
-        ind_ranged = date_range_filter(ind, f'allsig_{s}')
+        ind_ranged = apply_sidebar_range(ind)
         fallback_note = (f'<span style="color:#c62828;margin-left:6px;font-size:0.72rem;">'
                          f'(showing {eff} — no {source_choice} coverage)</span>') if eff != source_choice else ''
         st.markdown(
@@ -883,9 +895,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             # Same window applied to both price (GSCI) and fut (futures) so the
             # secondary-axis GSCI line doesn't fall out of sync with the
             # date-filtered primary line.
-            rng_start, rng_end = get_date_range(price, f'{short}_price')
-            price_ranged = apply_range(price, rng_start, rng_end)
-            fut_ranged = apply_range(fut, rng_start, rng_end)
+            price_ranged = apply_sidebar_range(price)
+            fut_ranged = apply_sidebar_range(fut)
             st.plotly_chart(chart_price(short, price_ranged, fut_ranged, show_tues, source=eff),
                             width='stretch', key=f'{short}_pricechart')
 
@@ -894,14 +905,14 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             col_map = {'ST_Avg': ST_COLS, 'MT_Avg': MT_COLS, 'LT_Avg': LT_COLS,
                       'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
             show_underlying = st.checkbox('Show underlying signals', value=False, key=f'{short}_underlying')
-            ind_ranged = date_range_filter(ind, f'{short}_ind')
+            ind_ranged = apply_sidebar_range(ind)
             underlying = col_map[composite] if show_underlying else []
             st.plotly_chart(chart_signals(ind_ranged, underlying, composite),
                             width='stretch', key=f'{short}_sigchart')
 
         with sub_weekly:
             view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
-            ind_ranged_w = date_range_filter(ind, f'{short}_weekly')
+            ind_ranged_w = apply_sidebar_range(ind)
             st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
                             width='stretch', key=f'{short}_weeklychart')
             st.plotly_chart(chart_weekly_change_total(ind_ranged_w, view),
