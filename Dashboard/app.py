@@ -184,25 +184,6 @@ def fmt_price(short: str, val: float) -> str:
     return f'{val:,.1f}'
 
 
-def kpi_strip(items: list) -> str:
-    """Super-compact one-line KPI row — replaces 5 separate bordered cards with
-    a single thin strip (label + colored value pairs inline). items: list of
-    (label, value_float, display_str)."""
-    def _color(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return '#888'
-        return '#1b8a3d' if v > 0 else '#c62828' if v < 0 else '#555'
-
-    cells = ''.join(
-        f'<span style="margin-right:14px;white-space:nowrap;">'
-        f'<span style="font-size:0.6rem;color:#999;text-transform:uppercase;letter-spacing:0.02em;">{label}</span> '
-        f'<span style="font-size:0.74rem;font-weight:700;color:{_color(v)};">{disp}</span></span>'
-        for label, v, disp in items
-    )
-    return (f'<div style="padding:3px 10px;background:#f7f8fa;border:1px solid #e0e0e0;'
-           f'border-radius:5px;margin-bottom:6px;display:inline-block;">{cells}</div>')
-
-
 def section_header(title: str, subtitle: str = '') -> str:
     sub_html = (f'<div style="font-size:0.85rem;color:#777;margin-top:2px;">{subtitle}</div>'
                 if subtitle else '')
@@ -792,7 +773,7 @@ run_date_choice = (
     if _run_dates_for_picker else None
 )
 
-tab_names = ['Instrument', 'Overview', 'All Projections', 'All Signals']
+tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
@@ -871,28 +852,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             st.warning(f'No data for {short}.')
             continue
 
-        last = ind.iloc[-1]
-        if eff == 'Rollex':
-            subtitle = 'Rollex — this desk\'s own continuous roll-adjusted futures price'
-        else:
-            fut_last = fut['CLOSE'].iloc[-1] if not fut.empty else np.nan
-            subtitle = f'Futures: {fmt_price(short, fut_last)}  |  GSCI-based trend signal'
         if eff != source_choice:
-            subtitle += f'  (no {source_choice} coverage for {short} — showing {eff})'
-        st.markdown(section_header(f'{short} — {INSTRUMENT_LABELS[short]}', subtitle),
-                   unsafe_allow_html=True)
-
-        # KPI row matches the original's 5 composites (ST/MT/LT/All/WAll, x100
-        # int-style display); futures price moved to the header above instead
-        # of a 6th card. Rendered as one compact strip instead of 5 bordered
-        # cards to cut down the vertical space it takes.
-        st.markdown(kpi_strip([
-            ('ST',   last['ST_Avg'],   f"{last['ST_Avg'] * 100:+.1f}"),
-            ('MT',   last['MT_Avg'],   f"{last['MT_Avg'] * 100:+.1f}"),
-            ('LT',   last['LT_Avg'],   f"{last['LT_Avg'] * 100:+.1f}"),
-            ('All',  last['All_Avg'],  f"{last['All_Avg'] * 100:+.1f}"),
-            ('WAll', last['WAll_Avg'], f"{last['WAll_Avg'] * 100:+.1f}"),
-        ]), unsafe_allow_html=True)
+            st.caption(f'No {source_choice} coverage for {short} — showing {eff}.')
 
         sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
 
