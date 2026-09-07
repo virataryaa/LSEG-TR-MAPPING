@@ -37,19 +37,25 @@ SHORTS = ['KC', 'CT', 'SB', 'CC', 'OJ']
 
 ST_COLS_PREFIX = ('Mom_5', 'Mom_10', 'Mom_15', 'Mom_20', 'Mom_25')  # not used directly — full lists loaded from indicators columns
 
-# ── Custom CSS (dark theme, house style — no emojis, per established dashboard style) ──
+# ── Custom CSS (light theme forced, house style — no emojis, per established dashboard style) ──
 
+# Force light theme regardless of the viewer's OS/browser preference — overrides
+# Streamlit Cloud's auto dark-mode and the config.toml default in one place.
 st.markdown("""
 <style>
+:root, .stApp { color-scheme: light !important; }
+.stApp { background-color: #ffffff !important; }
 .kpi-card {
-    background: #1e1e1e; border-radius: 8px; padding: 14px 18px;
-    border: 1px solid #333; text-align: center;
+    background: #f7f8fa; border-radius: 8px; padding: 14px 18px;
+    border: 1px solid #e0e0e0; text-align: center;
 }
-.kpi-label { color: #aaa; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
-.kpi-value { color: #fff; font-size: 1.6rem; font-weight: 600; margin-top: 4px; }
+.kpi-label { color: #666; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.kpi-value { color: #111; font-size: 1.6rem; font-weight: 600; margin-top: 4px; }
 .kpi-sub { color: #888; font-size: 0.75rem; margin-top: 2px; }
 </style>
 """, unsafe_allow_html=True)
+
+PLOTLY_TEMPLATE = 'plotly_white'
 
 # ── Data loading (cached) ────────────────────────────────────────────────────────
 
@@ -106,8 +112,12 @@ LT_COLS = [c for c in _all_cols if _bucket(c) == 'LT']
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_instrument_data(short: str):
-    price = price_all[price_all['Commodity'] == short].sort_values('Date').set_index('Date')
-    fut   = fut_all[fut_all['Commodity'] == short].sort_values('Date').set_index('Date')
+    # price_history.parquet / futures_price.parquet use column 'Close' (Title Case);
+    # rename to 'CLOSE' here so downstream chart/KPI code has one consistent name.
+    price = (price_all[price_all['Commodity'] == short].sort_values('Date')
+             .set_index('Date')[['Close']].rename(columns={'Close': 'CLOSE'}))
+    fut   = (fut_all[fut_all['Commodity'] == short].sort_values('Date')
+             .set_index('Date')[['Close']].rename(columns={'Close': 'CLOSE'}))
     ind   = ind_all[ind_all['Commodity'] == short].sort_values('Date').set_index('Date')
     sim   = sim_all[sim_all['Commodity'] == short].sort_values(['Run_Date', 'Horizon_Day'])
     return price, fut, ind, sim
@@ -170,7 +180,7 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
                                  line=dict(color=color, width=1.0, dash='dot'), yaxis='y2'))
         fig.update_layout(yaxis2=dict(overlaying='y', side='right', showgrid=False, title='Futures'))
     fig.update_layout(
-        template='plotly_dark', height=420, margin=dict(l=10, r=10, t=30, b=10),
+        template=PLOTLY_TEMPLATE, height=420, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.08), yaxis_title='GSCI Index Level',
         title=f'{INSTRUMENT_LABELS.get(short, short)} — Price',
     )
@@ -187,7 +197,7 @@ def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
                              line=dict(color='#FFD54F', width=2.4)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(
-        template='plotly_dark', height=460, margin=dict(l=10, r=10, t=30, b=10),
+        template=PLOTLY_TEMPLATE, height=460, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.1), yaxis=dict(range=[-1.05, 1.05]),
         title=f'Signals — {composite}',
     )
@@ -210,7 +220,7 @@ def chart_projection(sim_latest: pd.DataFrame, price_actual: pd.DataFrame, signa
             fig.add_trace(go.Scatter(x=sim_latest['Horizon_Date'], y=sim_latest[pcol], name=f'Price ({scen})',
                                      line=dict(color=scen_colors[scen], width=1.4, dash='dash')), row=2, col=1)
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=1)
-    fig.update_layout(template='plotly_dark', height=560, margin=dict(l=10, r=10, t=50, b=10),
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=560, margin=dict(l=10, r=10, t=50, b=10),
                       legend=dict(orientation='h', y=1.08))
     return fig
 
@@ -243,7 +253,7 @@ def chart_weekly_change(ind: pd.DataFrame, view: str):
     fig.add_trace(go.Bar(x=tues.index, y=d_lt, name='LT contribution', marker_color='#BA68C8'))
     fig.add_trace(go.Scatter(x=tues.index, y=d_tot, name=f'Total Δ{total_col}',
                              line=dict(color='#FFD54F', width=2), mode='lines+markers'))
-    fig.update_layout(barmode='relative', template='plotly_dark', height=420,
+    fig.update_layout(barmode='relative', template=PLOTLY_TEMPLATE, height=420,
                       margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation='h', y=1.1),
                       title=f'Weekly Change Decomposition ({view})')
     return fig
@@ -327,7 +337,7 @@ with tabs[2]:
         fig.add_trace(go.Scatter(x=ind.index, y=ind[composite_choice], name=s,
                                  line=dict(color=MKT_COLOR.get(s, None), width=1.6)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
-    fig.update_layout(template='plotly_dark', height=520, margin=dict(l=10, r=10, t=30, b=10),
+    fig.update_layout(template=PLOTLY_TEMPLATE, height=520, margin=dict(l=10, r=10, t=30, b=10),
                       legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-1.05, 1.05]))
     st.plotly_chart(fig, use_container_width=True)
 
