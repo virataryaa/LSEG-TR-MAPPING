@@ -313,16 +313,16 @@ def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str =
 
 
 def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
-    """Compact date-range control: radio for quick ranges + custom two-date
-    picker. Returns (start_ts, end_ts) rather than a filtered frame so the same
-    window can be applied to more than one DataFrame (e.g. price + futures)
-    without desyncing them.
+    """Compact date-range control: radio for quick ranges + two independent
+    From/To calendar widgets for Custom. Returns (start_ts, end_ts) rather than
+    a filtered frame so the same window can be applied to more than one
+    DataFrame (e.g. price + futures) without desyncing them.
 
-    st.date_input with a range `value` returns a SINGLE date (not a 2-tuple)
-    the moment the user has picked only the first end of the range — unpacking
-    that as `start, end = ...` crashes with ValueError until the second date is
-    picked. Handled defensively below instead of assuming a 2-tuple."""
-    c1, c2 = st.columns([2, 2])
+    Two separate single-date st.date_input widgets (not one range-mode widget)
+    — a range-mode date_input returns a single date instead of a 2-tuple until
+    both ends are picked, which crashed the unpack here before; two single-date
+    pickers sidestep that entirely since each always returns exactly one date."""
+    c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
         choice = st.radio(
             'Date range', ['1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
@@ -332,18 +332,19 @@ def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
     min_date = pd.Timestamp(df.index.min())
     if choice == 'Custom':
         with c2:
-            picked = st.date_input(
-                'Custom range', value=(max_date - pd.Timedelta(days=365), max_date),
-                min_value=min_date, max_value=max_date, key=f'{key_prefix}_custom',
+            start = st.date_input(
+                'From', value=(max_date - pd.Timedelta(days=365)).date(),
+                min_value=min_date, max_value=max_date, key=f'{key_prefix}_from',
             )
-        if isinstance(picked, (tuple, list)) and len(picked) == 2:
-            start, end = picked
-        else:
-            # Only one end picked so far — hold the other at the current bound
-            # instead of crashing; the chart re-renders once both are chosen.
-            single = picked[0] if isinstance(picked, (tuple, list)) else picked
-            start, end = single, max_date
-        return pd.Timestamp(start), pd.Timestamp(end)
+        with c3:
+            end = st.date_input(
+                'To', value=max_date.date(),
+                min_value=min_date, max_value=max_date, key=f'{key_prefix}_to',
+            )
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        if start > end:
+            start, end = end, start
+        return start, end
     if choice == 'All':
         return min_date, max_date
     years_map = {'1Y': 1, '3Y': 3, '5Y': 5, '10Y': 10}
