@@ -788,15 +788,12 @@ with tabs[1]:
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
         fallback_note = f'  *(showing {eff} — no {source_choice} coverage)*' if eff != source_choice else ''
         st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()}){fallback_note}")
-        col_chart, col_table = st.columns([7, 5])
-        with col_chart:
-            st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind),
-                            width='stretch', key=f'allproj_chart_{s}')
-        with col_table:
-            st.markdown(
-                projection_table_html(sim_latest, s),
-                unsafe_allow_html=True,
-            )
+        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind),
+                        width='stretch', key=f'allproj_chart_{s}')
+        st.markdown(
+            projection_table_html(sim_latest, s),
+            unsafe_allow_html=True,
+        )
 
 # ── All Signals tab ──────────────────────────────────────────────────────────
 
@@ -913,12 +910,9 @@ for i, short in enumerate(SHORTS):
                 elif show_mc:
                     st.caption('Monte Carlo bands are only available for the latest run date.')
 
-                col_chart, col_table = st.columns([7, 5])
-                with col_chart:
-                    st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
-                                    width='stretch', key=f'{short}_projchart')
-                with col_table:
-                    st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)
+                st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
+                                width='stretch', key=f'{short}_projchart')
+                st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)
 
                 st.caption(
                     'Actual Close (backfilled outcome for past horizon dates) — not part of the '
