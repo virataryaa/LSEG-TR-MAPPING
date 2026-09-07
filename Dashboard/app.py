@@ -566,14 +566,20 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
         mc = mc_bands
         p10, p25, p50, p75, p90 = (mc[f'{signal_col}_{p}'] * 100 for p in ('p10', 'p25', 'p50', 'p75', 'p90'))
         x_mc = mc['Horizon_Date']
-        fig.add_trace(go.Scatter(x=x_mc, y=p90, line=dict(width=0), showlegend=False, hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=x_mc, y=p10, fill='tonexty', fillcolor='rgba(120,120,120,0.15)',
-                                 line=dict(width=0), name='MC 10-90%', hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=x_mc, y=p75, line=dict(width=0), showlegend=False, hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=x_mc, y=p25, fill='tonexty', fillcolor='rgba(90,90,90,0.28)',
-                                 line=dict(width=0), name='MC 25-75%', hoverinfo='skip'))
+        # mode='lines' is required on every one of these — Plotly defaults a
+        # Scatter trace to 'lines+markers' when it has under ~20 points (our
+        # 10-day horizon always does), so without it each band-boundary trace
+        # sprouts a stray, differently-auto-colored marker dot per point.
+        fig.add_trace(go.Scatter(x=x_mc, y=p90, mode='lines', line=dict(width=0),
+                                 showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p10, mode='lines', fill='tonexty', fillcolor='rgba(140,140,140,0.14)',
+                                 line=dict(width=0), name='MC 10–90%', hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p75, mode='lines', line=dict(width=0),
+                                 showlegend=False, hoverinfo='skip'))
+        fig.add_trace(go.Scatter(x=x_mc, y=p25, mode='lines', fill='tonexty', fillcolor='rgba(100,100,100,0.26)',
+                                 line=dict(width=0), name='MC 25–75%', hoverinfo='skip'))
         fig.add_trace(go.Scatter(x=x_mc, y=p50, name='MC median', mode='lines',
-                                 line=dict(color='#616161', width=1.4, dash='dot')))
+                                 line=dict(color='#757575', width=1.3, dash='dot'), hoverinfo='skip'))
 
     if not hist_sig.empty:
         fig.add_trace(go.Scatter(x=hist_sig.index, y=hist_sig[sig_col] * 100, name='Actual',
@@ -601,9 +607,11 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
 
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
     fig.update_layout(
-        template=PLOTLY_TEMPLATE, height=400, margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(orientation='h', y=1.08), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
-        title=f'{signal_col} — Signal Projection',
+        template=PLOTLY_TEMPLATE, height=460, margin=dict(l=10, r=10, t=90, b=10),
+        title=dict(text=f'{signal_col} — Signal Projection', x=0, xanchor='left', y=0.99, yanchor='top'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
+                   font=dict(size=10), tracegroupgap=4),
+        yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
     )
     return fig
 
