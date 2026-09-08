@@ -757,6 +757,29 @@ selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_pic
 _eff_for_picker = effective_source(selected_instrument, source_choice)
 _, _, _ind_for_picker, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
 
+# ── Latest data by instrument — right under the Instrument picker ──────────────
+# Computed fresh from ind_all every run (the same frame everything else reads,
+# loaded via the mtime-cache-busted load_all()) rather than a separately
+# cached value, so it can't silently go stale on its own.
+st.sidebar.markdown(
+    '<div style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;'
+    'border-top:1px solid #e0e0e0;padding-top:8px;margin-top:4px;margin-bottom:4px;">Latest Data by Instrument</div>',
+    unsafe_allow_html=True,
+)
+_latest_by_inst = ind_all.groupby(['Commodity', 'Source'])['Date'].max()
+_latest_rows = []
+for _s in SHORTS:
+    _parts = []
+    for _src in ('GSCI', 'Rollex'):
+        if (_s, _src) in _latest_by_inst.index:
+            _parts.append(f'{_src} {pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()}')
+    _latest_rows.append(
+        f'<div style="display:flex;justify-content:space-between;gap:8px;font-size:0.68rem;'
+        f'color:#555;padding:1px 0;"><b style="color:#111;">{_s}</b>'
+        f'<span style="text-align:right;">{" | ".join(_parts) if _parts else "—"}</span></div>'
+    )
+st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
+
 # Date range — one global (sidebar) control instead of a separate picker on
 # each of the Charts/Weekly Change/All Signals sub-views (every instrument's
 # usable range is roughly the same anyway). Bounds come from whichever
@@ -791,30 +814,6 @@ run_date_choice = (
                          format_func=lambda d: pd.Timestamp(d).date().isoformat(), key='run_date_picker')
     if _run_dates_for_picker else None
 )
-
-# ── Latest data by instrument — pinned to the bottom of the sidebar ────────────
-# Computed fresh from ind_all every run (the same frame everything else reads,
-# loaded via the mtime-cache-busted load_all()) rather than a separately
-# cached value, so it can't silently go stale on its own.
-st.sidebar.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
-st.sidebar.markdown(
-    '<div style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;'
-    'border-top:1px solid #e0e0e0;padding-top:8px;margin-bottom:4px;">Latest Data by Instrument</div>',
-    unsafe_allow_html=True,
-)
-_latest_by_inst = ind_all.groupby(['Commodity', 'Source'])['Date'].max()
-_latest_rows = []
-for _s in SHORTS:
-    _parts = []
-    for _src in ('GSCI', 'Rollex'):
-        if (_s, _src) in _latest_by_inst.index:
-            _parts.append(f'{_src} {pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()}')
-    _latest_rows.append(
-        f'<div style="display:flex;justify-content:space-between;gap:8px;font-size:0.68rem;'
-        f'color:#555;padding:1px 0;"><b style="color:#111;">{_s}</b>'
-        f'<span style="text-align:right;">{" | ".join(_parts) if _parts else "—"}</span></div>'
-    )
-st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
 
 tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
