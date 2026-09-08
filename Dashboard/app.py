@@ -435,6 +435,7 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
         template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.08), yaxis_title=primary_name,
         title=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source})',
+        xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),  # no weekend gaps
     )
     if show_tuesdays:
         add_tuesday_lines(fig, primary_index)
@@ -456,6 +457,7 @@ def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
         template=PLOTLY_TEMPLATE, height=320, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.1), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
         title=f'Signals — {composite}',
+        xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),
     )
     return fig
 
@@ -482,6 +484,7 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
     fig.update_layout(
         template=PLOTLY_TEMPLATE, height=280, margin=dict(l=10, r=10, t=20, b=10),
         legend=dict(orientation='h', y=1.12), yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
+        xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),
     )
     return fig
 
@@ -595,13 +598,27 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
         legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
                    font=dict(size=10), tracegroupgap=4),
         yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
+        xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),
     )
     return fig
 
 
+def _weekly_tues_series(ind: pd.DataFrame) -> pd.DataFrame:
+    """Tuesdays only, plus a partial 'week-to-date' row for the latest date if
+    it's past the most recent Tuesday — matches the original Dash tool's
+    _weekly_tues_series(): the current, still-incomplete week gets its own
+    partial bar instead of waiting for next Tuesday to show anything."""
+    tues = ind[ind.index.dayofweek == 1].copy()
+    if not tues.empty and not ind.empty and ind.index[-1] > tues.index[-1]:
+        tues = pd.concat([tues, ind.iloc[[-1]]])
+    elif tues.empty and not ind.empty:
+        tues = ind.iloc[[-1]].copy()
+    return tues
+
+
 def chart_weekly_change(ind: pd.DataFrame, view: str):
     """Tuesday-to-Tuesday change decomposition into weighted ST/MT/LT stacked bars."""
-    tues = ind[ind.index.dayofweek == 1].copy()
+    tues = _weekly_tues_series(ind)
     if len(tues) < 2:
         return go.Figure()
     tues = tues.sort_index()
@@ -639,7 +656,7 @@ def chart_weekly_change_total(ind: pd.DataFrame, view: str):
     """Simple green/red bar of the total weekly change only — a separate,
     simpler companion chart to chart_weekly_change() in the original Dash app
     (chart_weekly_change_total()), missing from the first Streamlit port."""
-    tues = ind[ind.index.dayofweek == 1].copy().sort_index()
+    tues = _weekly_tues_series(ind).sort_index()
     if len(tues) < 2:
         return go.Figure()
     total_col = 'WAll_Avg' if view == 'WAll' else 'All_Avg'
@@ -774,6 +791,30 @@ run_date_choice = (
                          format_func=lambda d: pd.Timestamp(d).date().isoformat(), key='run_date_picker')
     if _run_dates_for_picker else None
 )
+
+# ── Latest data by instrument — pinned to the bottom of the sidebar ────────────
+# Computed fresh from ind_all every run (the same frame everything else reads,
+# loaded via the mtime-cache-busted load_all()) rather than a separately
+# cached value, so it can't silently go stale on its own.
+st.sidebar.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+st.sidebar.markdown(
+    '<div style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;'
+    'border-top:1px solid #e0e0e0;padding-top:8px;margin-bottom:4px;">Latest Data by Instrument</div>',
+    unsafe_allow_html=True,
+)
+_latest_by_inst = ind_all.groupby(['Commodity', 'Source'])['Date'].max()
+_latest_rows = []
+for _s in SHORTS:
+    _parts = []
+    for _src in ('GSCI', 'Rollex'):
+        if (_s, _src) in _latest_by_inst.index:
+            _parts.append(f'{_src} {pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()}')
+    _latest_rows.append(
+        f'<div style="display:flex;justify-content:space-between;gap:8px;font-size:0.68rem;'
+        f'color:#555;padding:1px 0;"><b style="color:#111;">{_s}</b>'
+        f'<span style="text-align:right;">{" | ".join(_parts) if _parts else "—"}</span></div>'
+    )
+st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
 
 tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
