@@ -1044,7 +1044,7 @@ for _s in SHORTS:
     )
 st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
 
-tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Signals']
+tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
@@ -1065,28 +1065,6 @@ with tabs[1]:
         )),
         unsafe_allow_html=True,
     )
-
-# ── All Signals tab ──────────────────────────────────────────────────────────
-
-with tabs[2]:
-    st.markdown(section_header('All Signals — CTA Signals per Instrument',
-                               'Each instrument\'s own ST/MT/LT/All/WAll composites, stacked'),
-               unsafe_allow_html=True)
-    for s in SHORTS:
-        eff = instrument_source(s)
-        _, _, ind, _, _ = get_instrument_data(s, eff)
-        if ind.empty:
-            continue
-        ind_ranged = apply_sidebar_range(ind)
-        oj_note = (f'<span style="color:#888;margin-left:6px;font-size:0.72rem;font-style:italic;">'
-                  f'(GSCI — no Rollex coverage)</span>') if s == 'OJ' else ''
-        st.markdown(
-            f'<div style="border-bottom:2px solid {MKT_COLOR.get(s, "#333")};padding-bottom:3px;margin:6px 0;">'
-            f'<span style="font-weight:700;color:{MKT_COLOR.get(s, "#333")};">{s}</span>'
-            f'<span style="color:#888;margin-left:6px;">{INSTRUMENT_LABELS[s]}</span>{oj_note}</div>',
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(chart_signals_all(ind_ranged, s), width='stretch', key=f'allsig_chart_{s}')
 
 # ── Instrument tab (driven by the sidebar slicer, not a tab per instrument) ────
 
