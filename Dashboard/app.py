@@ -881,7 +881,12 @@ with tabs[2]:
         latest_run = sim['Run_Date'].max()
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
         fallback_note = f'  *(showing {eff} — no {source_choice} coverage)*' if eff != source_choice else ''
-        st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()}){fallback_note}")
+        _asof_px = price.index[price.index <= latest_run]
+        _asof_note = (f' <span style="color:#888;font-size:0.78rem;font-style:italic;">'
+                     f'(as of latest date on which it was run: {_asof_px[-1].date()})</span>'
+                     if len(_asof_px) > 0 else '')
+        st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()}){_asof_note}{fallback_note}",
+                   unsafe_allow_html=True)
         st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind),
                         width='stretch', key=f'allproj_chart_{s}')
         st.markdown(
