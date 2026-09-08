@@ -39,7 +39,7 @@ if %ERRORLEVEL% NEQ 0 (
 :: Step 2 - Push updated parquets to GitHub
 echo [2] Pushing to GitHub... >> %LOG%
 cd /d "C:\Users\virat.arya\ETG\SoftsDatabase - Documents\Database\Hardmine\LSEG\CTA"
-git add Database\price_history.parquet Database\futures_price.parquet Database\indicators.parquet Database\sim_history.parquet >> %LOG% 2>&1
+git add Database\price_history.parquet Database\futures_price.parquet Database\indicators.parquet Database\sim_history.parquet Database\active_labels.parquet >> %LOG% 2>&1
 git diff --cached --quiet
 if %ERRORLEVEL% NEQ 0 (
     git commit -m "Auto update: CTA (LSEG) %date%" >> %LOG% 2>&1
