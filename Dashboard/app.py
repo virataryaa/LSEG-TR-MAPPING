@@ -368,8 +368,8 @@ def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
     both ends are picked, which crashed the unpack here before; two single-date
     pickers sidestep that entirely since each always returns exactly one date."""
     choice = st.sidebar.radio(
-        'Date range', ['1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
-        index=2, horizontal=True, key=f'{key_prefix}_range',
+        'Date range', ['3M', '1Y', '3Y', '5Y', '10Y', 'All', 'Custom'],
+        index=3, horizontal=True, key=f'{key_prefix}_range',
     )
     max_date = pd.Timestamp(df.index.max())
     min_date = pd.Timestamp(df.index.min())
@@ -388,6 +388,8 @@ def get_date_range(df: pd.DataFrame, key_prefix: str) -> tuple:
         return start, end
     if choice == 'All':
         return min_date, max_date
+    if choice == '3M':
+        return max_date - pd.DateOffset(months=3), max_date
     years_map = {'1Y': 1, '3Y': 3, '5Y': 5, '10Y': 10}
     return max_date - pd.DateOffset(years=years_map[choice]), max_date
 

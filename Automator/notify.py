@@ -54,6 +54,26 @@ def indicator_summary() -> str:
     return "\n".join(lines)
 
 
+def week_to_date_note() -> str:
+    """Same Tuesday-to-Tuesday convention as the dashboard's Weekly Change
+    caption — states the week runs Tuesday-to-Tuesday, and if the latest data
+    is past the most recent Tuesday, calls out that partial week-to-date span."""
+    path = DB_DIR / "indicators.parquet"
+    if not path.exists():
+        return "Week = Tuesday-to-Tuesday."
+    df = pd.read_parquet(path)
+    df["Date"] = pd.to_datetime(df["Date"])
+    if df.empty:
+        return "Week = Tuesday-to-Tuesday."
+    latest_date = df["Date"].max()
+    tues_dates = df.loc[df["Date"].dt.dayofweek == 1, "Date"]
+    last_tuesday = tues_dates.max() if not tues_dates.empty else None
+    if last_tuesday is not None and latest_date > last_tuesday:
+        return (f"Week = Tuesday-to-Tuesday  |  Latest bar is week-to-date (partial): "
+                f"{last_tuesday.date()} -> {latest_date.date()}.")
+    return "Week = Tuesday-to-Tuesday."
+
+
 def send_outlook_email(subject: str, body: str):
     try:
         import win32com.client
@@ -88,6 +108,7 @@ CTA TREND SIGNAL SUMMARY
 {"=" * 60}
 {indicator_summary()}
 {"=" * 60}
+{week_to_date_note()}
 
 Log: C:\\Users\\virat.arya\\ETG\\SoftsDatabase - Documents\\Database\\Hardmine\\LSEG\\CTA\\Automator\\run_log.txt
 """
