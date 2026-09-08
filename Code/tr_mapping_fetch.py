@@ -611,38 +611,51 @@ def _dc_signal_multi(close_df: pd.DataFrame, n: int) -> pd.DataFrame:
     return pd.DataFrame(out, index=close_df.index, columns=close_df.columns)
 
 
-def calculate_indicators_multi(close_df: pd.DataFrame) -> dict:
+def calculate_indicators_multi(close_df: pd.DataFrame, progress_cb=None) -> dict:
     """Vectorized multi-path version of calculate_indicators(). close_df: one
     column per Monte Carlo path (DatetimeIndex, weekdays only, all sharing the
     same history up to where the paths diverge). Returns the 5 composites as
-    {name: DataFrame(T, P)} — {'ST_Avg','MT_Avg','LT_Avg','All_Avg','WAll_Avg'}."""
+    {name: DataFrame(T, P)} — {'ST_Avg','MT_Avg','LT_Avg','All_Avg','WAll_Avg'}.
+
+    progress_cb(fraction, stage_name): optional, called after each of the 10
+    indicator families finishes — real stage-by-stage progress (not a fake
+    timer), for driving a UI progress bar during the Monte Carlo feature."""
     # Force plain numpy float64 — a pandas nullable 'Float64' input (e.g. from
     # a parquet round-trip) makes .to_numpy() return an object array, which
     # breaks np.isnan() in the stateful loops below.
     close_df = close_df.astype('float64')
     cols: dict[str, pd.DataFrame] = {}
+    _stages = ['Mom', 'MA', 'EMA', 'HMA', '3MA', 'BB', 'DC', 'LRS', 'TRIX', 'KAMA']
+
+    def _tick(stage: str):
+        if progress_cb is not None:
+            progress_cb((_stages.index(stage) + 1) / len(_stages), stage)
 
     for n in PARAMS['Mom']:
         ret = close_df.pct_change(n)
         vol = close_df.pct_change().rolling(n).std()
         cols[f'Mom_{n}'] = np.tanh(ret / (vol * np.sqrt(n))).fillna(0)
+    _tick('Mom')
 
     for s, l in PARAMS['MA']:
         sma_s, sma_l = close_df.rolling(s).mean(), close_df.rolling(l).mean()
         cols[f'MA_cross_({s}, {l})'] = pd.DataFrame(
             np.where(sma_s > sma_l, 1, -1), index=close_df.index, columns=close_df.columns, dtype=float)
+    _tick('MA')
 
     for s, l in PARAMS['EMA']:
         ema_s = close_df.ewm(span=s, adjust=False).mean()
         ema_l = close_df.ewm(span=l, adjust=False).mean()
         cols[f'EMA_cross_({s}, {l})'] = pd.DataFrame(
             np.where(ema_s > ema_l, 1, -1), index=close_df.index, columns=close_df.columns, dtype=float)
+    _tick('EMA')
 
     for s, l in PARAMS['HMA']:
         hma_s, hma_l = _hma_multi(close_df, s), _hma_multi(close_df, l)
         sig = pd.DataFrame(np.where(hma_s > hma_l, 1, -1), index=close_df.index,
                            columns=close_df.columns, dtype=float)
         cols[f'HMA_cross_({s}, {l})'] = sig.where(hma_s.notna() & hma_l.notna(), other=0.0)
+    _tick('HMA')
 
     for s, mm, l in PARAMS['3MA']:
         vs = close_df.rolling(s).mean().to_numpy()
@@ -652,24 +665,30 @@ def calculate_indicators_multi(close_df: pd.DataFrame) -> dict:
         sig = np.where((vs > vm) & (vm > vl), 1, np.where((vs < vm) & (vm < vl), -1, 0))
         cols[f'3MA_cross_({s}, {mm}, {l})'] = pd.DataFrame(
             np.where(invalid, 0, sig), index=close_df.index, columns=close_df.columns, dtype=float)
+    _tick('3MA')
 
     for n in PARAMS['BB']:
         cols[f'BB_{n}'] = _bb_signal_multi(close_df, n)
+    _tick('BB')
 
     for n in PARAMS['DC']:
         cols[f'DC_{n}'] = _dc_signal_multi(close_df, n)
+    _tick('DC')
 
     for n in PARAMS['LRS']:
         cols[f'LRS_{n}'] = np.sign(_linreg_slope_multi(close_df, n)).fillna(0)
+    _tick('LRS')
 
     for n in PARAMS['TRIX']:
         cols[f'TRIX_{n}'] = _trix_sign_multi(close_df, n)
+    _tick('TRIX')
 
     for n in PARAMS['KAMA']:
         kama = _kama_multi(close_df, n)
         sig = pd.DataFrame(np.where(close_df > kama, 1, -1), index=close_df.index,
                            columns=close_df.columns, dtype=float)
         cols[f'KAMA_{n}'] = sig.where(kama.notna(), other=0.0)
+    _tick('KAMA')
 
     st_avg   = sum(cols[c] for c in ST_COLS) / len(ST_COLS)
     mt_avg   = sum(cols[c] for c in MT_COLS) / len(MT_COLS)
@@ -995,7 +1014,9 @@ def reset_sim_history() -> None:
 # once-a-day batch step.
 
 def compute_monte_carlo_bands(price_df: pd.DataFrame, n_paths: int = MC_N_PATHS,
-                              horizon: int = 10, seed: int = 42) -> pd.DataFrame:
+                              horizon: int = 10, seed: int = 42, progress_cb=None) -> pd.DataFrame:
+    """progress_cb(fraction, stage_name): passed straight through to
+    calculate_indicators_multi() — see its docstring."""
     base = price_df['CLOSE'].tail(1500).copy()
     if len(base) < 300:
         return pd.DataFrame()
@@ -1016,7 +1037,7 @@ def compute_monte_carlo_bands(price_df: pd.DataFrame, n_paths: int = MC_N_PATHS,
         {f'p{i}': np.concatenate([base.to_numpy(), sim_prices[i]]) for i in range(n_paths)},
         index=idx,
     )
-    composites = calculate_indicators_multi(close_df)
+    composites = calculate_indicators_multi(close_df, progress_cb=progress_cb)
 
     bands = pd.DataFrame({'Horizon_Date': future_dates, 'Horizon_Day': range(1, horizon + 1)})
     for c_name, df_ in composites.items():

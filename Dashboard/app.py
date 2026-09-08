@@ -500,14 +500,32 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
 # looping calculate_indicators() N times: N=100 in ~2s, N=500 in ~11s. Cached
 # per (instrument, source, day, N) so repeat views are instant.
 
-@st.cache_data(ttl=86400, show_spinner=False)
 def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: int, seed: int = 42) -> pd.DataFrame:
-    """`last_date_str` is part of the cache key purely so the cache invalidates
-    once new data lands — it isn't otherwise used."""
+    """Session-scoped cache (st.session_state, not @st.cache_data) so a live
+    progress bar can run on the real computation — st.cache_data's key can't
+    include a UI progress callback. First view per (instrument, source, day,
+    N) in this browser session pays the cost with a progress bar; repeat
+    views in the same session return instantly. `last_date_str` is part of
+    the cache key purely so it invalidates once new data lands."""
+    cache_key = (short, source, last_date_str, n_paths, seed)
+    cache = st.session_state.setdefault('_mc_cache', {})
+    if cache_key in cache:
+        return cache[cache_key]
+
     price, _, _, _ = get_instrument_data(short, source)
     if price.empty:
-        return pd.DataFrame()
-    return compute_monte_carlo_bands(price, n_paths=n_paths, seed=seed)
+        cache[cache_key] = pd.DataFrame()
+        return cache[cache_key]
+
+    progress = st.progress(0, text=f'Monte Carlo ({n_paths} paths) — starting…')
+
+    def _cb(frac: float, stage: str):
+        progress.progress(frac, text=f'Monte Carlo ({n_paths} paths) — {stage} ({int(frac * 100)}%)')
+
+    result = compute_monte_carlo_bands(price, n_paths=n_paths, seed=seed, progress_cb=_cb)
+    progress.empty()
+    cache[cache_key] = result
+    return result
 
 
 def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
@@ -957,9 +975,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                 )
                 mc_bands = None
                 if show_mc and run_choice == run_dates[0]:
-                    with st.spinner(f'Running {mc_n_paths} Monte Carlo paths for {short}/{eff}…'):
-                        last_date_str = ind.index.max().isoformat()
-                        mc_bands = get_monte_carlo_bands(short, eff, last_date_str, mc_n_paths)
+                    last_date_str = ind.index.max().isoformat()
+                    mc_bands = get_monte_carlo_bands(short, eff, last_date_str, mc_n_paths)
                     if mc_bands.empty:
                         st.warning('Not enough history to run Monte Carlo for this instrument.')
                 elif show_mc:
