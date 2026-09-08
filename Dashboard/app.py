@@ -760,8 +760,20 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
         ), row=1, col=2)
 
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=2)
-    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=1)
-    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=2)
+
+    # Plotly auto-ranges each subplot's x-axis with ~5% padding beyond its
+    # data by default — on the left panel (years of history) that padding is
+    # itself several weeks wide, showing up as a visible empty gap right
+    # before the panel boundary. Pinning both axes' ranges to their actual
+    # data span (no padding) removes it, so "Actual" runs right up to each
+    # panel's edge and the two panels read as continuous.
+    right_end = sim_sel['Horizon_Date'].max()
+    if mc_bands is not None and not mc_bands.empty and 'Horizon_Date' in mc_bands.columns:
+        right_end = max(right_end, mc_bands['Horizon_Date'].max())
+    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], range=[hist_full.index.min(), hist_full.index.max()],
+                     row=1, col=1)
+    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], range=[hist_recent.index.min(), right_end],
+                     row=1, col=2)
     fig.update_yaxes(range=[-105, 105], dtick=20, tickformat='.0f', row=1, col=1)
     fig.update_yaxes(showticklabels=False, row=1, col=2)
     fig.update_layout(
