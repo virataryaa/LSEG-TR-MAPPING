@@ -984,11 +984,11 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
 
                 show_mc = st.checkbox(
                     'Show Monte Carlo bands', value=False, key=f'{short}_mc_toggle',
-                    help='Bootstraps N random 10-day price paths from recent daily returns and '
-                         'recomputes the full indicator set on each (all N paths at once, '
-                         'vectorized) — gives a probabilistic p10-p90 / p25-p75 range instead of '
-                         'the 3 deterministic UP/DOWN/UNCH scenarios. N is set in the sidebar. '
-                         'Cached per run date.',
+                    help='Bootstraps N random 10-day price paths from the last 500 trading days '
+                         '(~2 years) of daily returns and recomputes the full indicator set on '
+                         'each (all N paths at once, vectorized) — gives a probabilistic p10-p90 '
+                         '/ p25-p75 range instead of the 3 deterministic UP/DOWN/UNCH scenarios. '
+                         'N is set in the sidebar. Cached per run date.',
                 )
                 mc_bands = None
                 if show_mc and run_choice == run_dates[0]:
