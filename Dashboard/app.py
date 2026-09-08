@@ -774,7 +774,7 @@ st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
 
 _eff_for_picker = effective_source(selected_instrument, source_choice)
-_, _, _ind_for_picker, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
+_price_for_picker, _, _ind_for_picker, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
 
 # ── Latest data by instrument — right under the Instrument picker ──────────────
 # Computed fresh from ind_all every run (the same frame everything else reads,
@@ -833,6 +833,14 @@ run_date_choice = (
                          format_func=lambda d: pd.Timestamp(d).date().isoformat(), key='run_date_picker')
     if _run_dates_for_picker else None
 )
+# Run Date is the day the script ran, not necessarily the day the price data
+# is FROM (the LSEG feed can lag) — show which price date was actually used,
+# via an as-of lookup (last price_history row on/before Run Date) so this is
+# correct for older Run Dates too, not just the latest.
+if run_date_choice is not None and not _price_for_picker.empty:
+    _asof = _price_for_picker.index[_price_for_picker.index <= run_date_choice]
+    if len(_asof) > 0:
+        st.sidebar.caption(f'Priced as of: {_asof[-1].date().isoformat()}')
 
 tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
