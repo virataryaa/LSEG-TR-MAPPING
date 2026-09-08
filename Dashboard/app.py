@@ -684,12 +684,14 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
 
 
 def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, ind_full: pd.DataFrame,
-                           mc_bands: pd.DataFrame = None, recent_days: int = 15):
+                           mc_bands: pd.DataFrame = None):
     """Split-panel version of chart_projection() for the 'Full History +
     Projection' sub-tab: the full chosen date-range history on the left
-    (compressed — however many years) and a FIXED-width recent-history +
-    10-day-fan panel on the right (always recent_days wide, regardless of how
-    long the left panel's span is), sharing one y-axis. Squeezing a multi-year
+    (compressed — however many years, ending at the latest point), and JUST
+    the 10-day projection fan on the right starting from that same latest
+    point — no recent-history line redrawn on the right (that duplicated the
+    left panel's tail and made the two panels look disconnected instead of
+    like one continuing series). Shares one y-axis. Squeezing a multi-year
     history and a 10-day fan onto one continuous time axis crushed the fan
     into an unreadable sliver — this keeps the fan a fixed, legible size no
     matter the history length instead."""
@@ -701,23 +703,24 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
 
     color = MKT_COLOR.get(short, '#1f77b4')
     hist_full = ind_full[[sig_col]]
-    hist_recent = hist_full.tail(recent_days)
-    anchor_date = hist_recent.index[-1]
-    last_sig_val = _safe_round(hist_recent[sig_col].iloc[-1], scale=100)
+    anchor_date = hist_full.index[-1]
+    last_sig_val = _safe_round(hist_full[sig_col].iloc[-1], scale=100)
     if last_sig_val is None:
         last_sig_val = 0
 
     fig = make_subplots(
         rows=1, cols=2, shared_yaxes=True, column_widths=[0.72, 0.28], horizontal_spacing=0.02,
-        subplot_titles=('History (chosen date range)', f'Last {recent_days}d + 10d Projection'),
+        subplot_titles=('History (chosen date range)', 'Projection (10d)'),
     )
 
-    # ── Left panel: full compressed history ────────────────────────────────
+    # ── Left panel: full compressed history, ending at the latest point ────
     fig.add_trace(go.Scatter(x=hist_full.index, y=hist_full[sig_col] * 100, name='Actual',
                              line=dict(color=color, width=1.4), showlegend=True), row=1, col=1)
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=1)
 
-    # ── Right panel: recent history + MC bands + UP/DOWN/UNCH fan (fixed width) ─
+    # ── Right panel: JUST the MC bands + UP/DOWN/UNCH fan, starting from the ──
+    # same anchor point the left panel ends on (no redrawn history line) so
+    # the fan reads as a direct continuation of the left panel.
     if mc_bands is not None and not mc_bands.empty and signal_col in ('ST', 'MT', 'LT', 'All', 'WAll'):
         mc = mc_bands
         x_mc = [anchor_date] + list(mc['Horizon_Date'])
@@ -736,8 +739,11 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
         fig.add_trace(go.Scatter(x=x_mc, y=p50, name='MC median', mode='lines',
                                  line=dict(color='#757575', width=1.3, dash='dot'), hoverinfo='skip'), row=1, col=2)
 
-    fig.add_trace(go.Scatter(x=hist_recent.index, y=hist_recent[sig_col] * 100, name='Actual',
-                             line=dict(color=color, width=2), showlegend=False), row=1, col=2)
+    # Single anchor-point marker (same color/style as "Actual") so the fan's
+    # start is visually tied to the left panel's last point, without
+    # redrawing any of the recent-history line itself.
+    fig.add_trace(go.Scatter(x=[anchor_date], y=[last_sig_val], mode='markers', marker=dict(size=6, color=color),
+                             name='Actual', showlegend=False, hoverinfo='skip'), row=1, col=2)
 
     scen_style = {
         'up':   ('↑ UP',   '#1b8a3d', 'dash',    'top center'),
@@ -772,7 +778,7 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
         right_end = max(right_end, mc_bands['Horizon_Date'].max())
     fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], range=[hist_full.index.min(), hist_full.index.max()],
                      row=1, col=1)
-    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], range=[hist_recent.index.min(), right_end],
+    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], range=[anchor_date, right_end],
                      row=1, col=2)
     fig.update_yaxes(range=[-105, 105], dtick=20, tickformat='.0f', row=1, col=1)
     fig.update_yaxes(showticklabels=False, row=1, col=2)
@@ -1148,7 +1154,7 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             if sim.empty:
                 st.info('No simulation history for this instrument.')
             else:
-                st.caption('Left: full signal history (per the sidebar date range). Right: fixed-width recent history + Monte Carlo projection fan — stays readable regardless of how far left goes.')
+                st.caption('Left: full signal history (per the sidebar date range), up to the latest point. Right: the 10-day Monte Carlo projection fan continuing from that same point.')
                 full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
                                        horizontal=True, key=f'{short}_fullsignal')
                 ind_ranged_full = apply_sidebar_range(ind)
