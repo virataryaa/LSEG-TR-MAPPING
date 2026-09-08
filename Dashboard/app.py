@@ -503,7 +503,8 @@ def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_se
         subplot_titles=('History (chosen date range)', 'Projection (10d)'),
     )
     fig.add_trace(go.Scatter(x=primary.index, y=primary['CLOSE'], name=primary_name,
-                             line=dict(color=color, width=1.6), showlegend=True), row=1, col=1)
+                             line=dict(color=color, width=1.6), showlegend=True,
+                             hovertemplate='%{x|%Y-%m-%d}<br>%{y:,.1f}<extra></extra>'), row=1, col=1)
     if not primary.empty:
         fig.update_xaxes(range=[primary.index.min(), primary.index.max()],
                          rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=1)
@@ -528,6 +529,7 @@ def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_se
             fig.add_trace(go.Scatter(
                 x=x_vals, y=y_vals, name=name, mode='lines+markers',
                 line=dict(color=clr, width=1.6, dash=dash), marker=dict(size=5, color=clr),
+                hovertemplate=f'{name}<br>' + '%{x|%Y-%m-%d}<br>%{y:,.1f}<extra></extra>',
             ), row=1, col=2)
         right_end = sim_sel['Horizon_Date'].max()
         fig.update_xaxes(range=[anchor_date, right_end], rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=2)
@@ -704,18 +706,23 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
                                  line=dict(color=color, width=2)))
 
     scen_style = {
-        'up':   ('↑ UP',   '#1b8a3d', 'dash',    'top center'),
-        'down': ('↓ DOWN', '#c62828', 'dot',     'bottom center'),
-        'unch': ('UNCH',   '#9E9E9E', 'dashdot', 'middle right'),
+        'up':   ('↑ UP',   '#1b8a3d', 'dash', 'top center'),
+        'down': ('↓ DOWN', '#c62828', 'dot',  'bottom center'),
+        'unch': ('UNCH',   '#9E9E9E', 'dot',  'middle right'),
     }
     for scen, (name, clr, dash, tpos) in scen_style.items():
         col = f'{signal_col}_{scen}'
         if col not in sim_sel.columns:
             continue
-        pcol = f'price_{scen}'
-        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
         y_vals = [last_sig_val] + [_safe_round(v, scale=100) for v in sim_sel[col]]
         x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
+        if scen == 'unch':
+            # No price labels on UNCH — just a plain dotted line, no markers/text.
+            fig.add_trace(go.Scatter(x=x_vals, y=y_vals, name=name, mode='lines',
+                                     line=dict(color=clr, width=1.8, dash=dash)))
+            continue
+        pcol = f'price_{scen}'
+        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
         p_labels = [''] + [('' if p is None or (isinstance(p, float) and np.isnan(p)) else f'{p:,.1f}') for p in prices]
         fig.add_trace(go.Scatter(
             x=x_vals, y=y_vals, name=name, mode='lines+markers+text',
@@ -798,18 +805,23 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
                              name='Actual', showlegend=False, hoverinfo='skip'), row=1, col=2)
 
     scen_style = {
-        'up':   ('↑ UP',   '#1b8a3d', 'dash',    'top center'),
-        'down': ('↓ DOWN', '#c62828', 'dot',     'bottom center'),
-        'unch': ('UNCH',   '#9E9E9E', 'dashdot', 'middle right'),
+        'up':   ('↑ UP',   '#1b8a3d', 'dash', 'top center'),
+        'down': ('↓ DOWN', '#c62828', 'dot',  'bottom center'),
+        'unch': ('UNCH',   '#9E9E9E', 'dot',  'middle right'),
     }
     for scen, (name, clr, dash, tpos) in scen_style.items():
         col = f'{signal_col}_{scen}'
         if col not in sim_sel.columns:
             continue
-        pcol = f'price_{scen}'
-        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
         y_vals = [last_sig_val] + [_safe_round(v, scale=100) for v in sim_sel[col]]
         x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
+        if scen == 'unch':
+            # No price labels on UNCH — just a plain dotted line, no markers/text.
+            fig.add_trace(go.Scatter(x=x_vals, y=y_vals, name=name, mode='lines',
+                                     line=dict(color=clr, width=1.8, dash=dash)), row=1, col=2)
+            continue
+        pcol = f'price_{scen}'
+        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
         p_labels = [''] + [('' if p is None or (isinstance(p, float) and np.isnan(p)) else f'{p:,.1f}') for p in prices]
         fig.add_trace(go.Scatter(
             x=x_vals, y=y_vals, name=name, mode='lines+markers+text',
