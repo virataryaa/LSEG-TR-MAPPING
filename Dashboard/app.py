@@ -1163,3 +1163,11 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                     chart_projection_split(sim_sel_full, full_signal, short, ind_ranged_full, mc_bands=mc_bands),
                     width='stretch', key=f'{short}_fullprojchart',
                 )
+
+                st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+                st.caption('Same history + fan, in one continuous view instead of split panels.')
+                st.plotly_chart(
+                    chart_projection(sim_sel_full, price, full_signal, short, ind=ind,
+                                     mc_bands=mc_bands, hist_df=ind_ranged_full),
+                    width='stretch', key=f'{short}_fullprojchart_single',
+                )
