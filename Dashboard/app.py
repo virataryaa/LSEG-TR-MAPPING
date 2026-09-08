@@ -1047,11 +1047,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
         mc_bands = (get_monte_carlo_bands(short, eff, str(ind.index.max()), MC_N_PATHS)
                    if not ind.empty else pd.DataFrame())
 
-        # Just 2 sub-tabs now (was 4: Charts/Weekly Change/Projection/Full
-        # History + Projection) — Weekly Change dropped in this restructure
-        # (its chart_weekly_change()/chart_weekly_change_total() functions are
-        # kept in code, unused, in case it comes back later).
-        sub_full, sub_signals = st.tabs(['Full History + Projection', 'Signals & Composites'])
+        sub_full, sub_signals, sub_weekly = st.tabs(
+            ['Full History + Projection', 'Signals & Composites', 'Weekly Change'])
 
         col_map = {'ST_Avg': ST_COLS, 'MT_Avg': MT_COLS, 'LT_Avg': LT_COLS,
                   'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
@@ -1117,3 +1114,26 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             for comp in ['ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg']:
                 st.plotly_chart(chart_signals(ind_ranged, comp, [], detail='none'),
                                 width='stretch', key=f'{short}_sigchart_{comp}')
+
+        with sub_weekly:
+            view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
+
+            # Week = Tuesday-to-Tuesday (matches this desk's COT reporting
+            # cadence, not calendar Mon-Fri) — same convention as the
+            # original tool. Called out explicitly since it's easy to assume
+            # a normal Mon-Fri week otherwise.
+            _tues_only = ind[ind.index.dayofweek == 1]
+            _wtd_note = ''
+            if not ind.empty and not _tues_only.empty and ind.index[-1] > _tues_only.index[-1]:
+                _wtd_note = (f'  Latest bar is **week-to-date** (partial): '
+                            f'{_tues_only.index[-1].date()} → {ind.index[-1].date()}.')
+            st.caption(
+                "Week = **Tuesday-to-Tuesday** (this desk's COT reporting cadence), not calendar Mon-Fri."
+                + _wtd_note
+            )
+
+            ind_ranged_w = apply_sidebar_range(ind)
+            st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
+                            width='stretch', key=f'{short}_weeklychart')
+            st.plotly_chart(chart_weekly_change_total(ind_ranged_w, view),
+                            width='stretch', key=f'{short}_weeklytotalchart')
