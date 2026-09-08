@@ -477,6 +477,74 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
     return fig
 
 
+def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_sel: pd.DataFrame,
+                      source: str = 'GSCI', active_label: str = None):
+    """Split-panel version of chart_price() — same column proportions
+    (0.72/0.28, 0.02 spacing) as chart_projection_split(), so this chart's
+    left panel lines up vertically with the signal chart's left panel right
+    below it on the page (a plain single-panel price chart above the split
+    signal chart was visibly misaligned once the projection fan's right
+    panel was added). Right panel shows the same deterministic UP/DOWN/UNCH
+    price scenarios (sim_sel's price_up/down/unch, the ones feeding the
+    signal projection below) continuing from the last actual price point —
+    GSCI mode's thin secondary-axis GSCI overlay is dropped here for
+    simplicity (only OJ uses GSCI; see plain chart_price() for that)."""
+    color = MKT_COLOR.get(short, '#1f77b4')
+    label_suffix = f" · {active_label}" if active_label else ''
+
+    if source == 'Rollex':
+        primary, primary_name = price, f'{short} Rollex (roll-adjusted){label_suffix}'
+    else:
+        primary, primary_name = ((fut, f'{short} Futures (front-month)') if not fut.empty
+                                 else (price, f'{short} GSCI Index'))
+
+    fig = make_subplots(
+        rows=1, cols=2, shared_yaxes=True, column_widths=[0.72, 0.28], horizontal_spacing=0.02,
+        subplot_titles=('History (chosen date range)', 'Projection (10d)'),
+    )
+    fig.add_trace(go.Scatter(x=primary.index, y=primary['CLOSE'], name=primary_name,
+                             line=dict(color=color, width=1.6), showlegend=True), row=1, col=1)
+    if not primary.empty:
+        fig.update_xaxes(range=[primary.index.min(), primary.index.max()],
+                         rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=1)
+
+    # ── Right panel: deterministic UP/DOWN/UNCH price scenarios, continuing ──
+    # from the last actual price point — same scenarios feeding the signal
+    # projection chart below, just in price terms instead of signal terms.
+    if sim_sel is not None and not sim_sel.empty and not primary.empty:
+        last_price = float(primary['CLOSE'].iloc[-1])
+        anchor_date = primary.index[-1]
+        scen_style = {
+            'up':   ('↑ UP',   '#1b8a3d', 'dash'),
+            'down': ('↓ DOWN', '#c62828', 'dot'),
+            'unch': ('UNCH',   '#9E9E9E', 'dashdot'),
+        }
+        for scen, (name, clr, dash) in scen_style.items():
+            pcol = f'price_{scen}'
+            if pcol not in sim_sel.columns:
+                continue
+            x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
+            y_vals = [last_price] + sim_sel[pcol].tolist()
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, name=name, mode='lines+markers',
+                line=dict(color=clr, width=1.6, dash=dash), marker=dict(size=5, color=clr),
+            ), row=1, col=2)
+        right_end = sim_sel['Horizon_Date'].max()
+        fig.update_xaxes(range=[anchor_date, right_end], rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=2)
+    else:
+        fig.update_xaxes(visible=False, row=1, col=2)
+
+    fig.update_yaxes(showticklabels=False, row=1, col=2)
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation='h', y=1.12, font=dict(size=10)),
+        title=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source}{label_suffix})',
+    )
+    for ann in fig.layout.annotations:  # subplot_titles come back as small grey captions
+        ann.font = dict(size=10, color='#999')
+    return fig
+
+
 def _indicator_family(col: str) -> str:
     """'Mom_5' -> 'Mom', 'MA_cross_(5, 10)' -> 'MA', '3MA_cross_(...)' -> '3MA',
     etc. — the leading family name shared by every one of PARAMS' 10 indicator
@@ -1038,15 +1106,20 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                   'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
 
         with sub_full:
-            show_tues = False  # "Show Tuesday lines" checkbox hidden for now — add_tuesday_lines() kept in code to re-enable later
-            # Same window applied to both price (GSCI) and fut (futures) so the
-            # secondary-axis GSCI line doesn't fall out of sync with the
-            # date-filtered primary line.
+            # sim_sel_full computed up front (not just inside the "else" below)
+            # so the price chart's right panel can show the same UP/DOWN/UNCH
+            # price scenarios too — keeps it visually aligned with (and a price
+            # counterpart to) the signal projection chart beneath it.
+            sim_sel_full = (sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
+                            if not sim.empty and run_choice is not None else pd.DataFrame())
+
             price_ranged = apply_sidebar_range(price)
             fut_ranged = apply_sidebar_range(fut)
-            st.plotly_chart(chart_price(short, price_ranged, fut_ranged, show_tues, source=eff,
-                                        active_label=active_label),
-                            width='stretch', key=f'{short}_pricechart')
+            st.plotly_chart(
+                chart_price_split(short, price_ranged, fut_ranged, sim_sel_full, source=eff,
+                                  active_label=active_label),
+                width='stretch', key=f'{short}_pricechart',
+            )
 
             if sim.empty:
                 st.info('No simulation history for this instrument.')
@@ -1054,7 +1127,6 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                 full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
                                        horizontal=True, key=f'{short}_fullsignal')
                 ind_ranged_full = apply_sidebar_range(ind)
-                sim_sel_full = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
                 if mc_bands.empty:
                     st.caption('Not enough history to run Monte Carlo for this instrument.')
 
