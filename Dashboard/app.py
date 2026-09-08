@@ -1110,10 +1110,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                             width='stretch', key=f'{short}_sigchart')
 
             st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
-            st.caption('Each composite on its own, for comparison.')
-            for comp in ['ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg']:
-                st.plotly_chart(chart_signals(ind_ranged, comp, [], detail='none'),
-                                width='stretch', key=f'{short}_sigchart_{comp}')
+            st.caption('All 5 composites together, for comparison.')
+            st.plotly_chart(chart_signals_all(ind_ranged, short), width='stretch', key=f'{short}_sigchart_all')
 
         with sub_weekly:
             view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
