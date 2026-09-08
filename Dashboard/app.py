@@ -24,7 +24,7 @@ DATA_DIR = BASE_DIR / 'Database'
 # in numba, which has no wheel for some Python versions Streamlit Cloud may
 # run — that dependency is gone now, so this is a plain top-level import.
 sys.path.insert(0, str(BASE_DIR / 'Code'))
-from tr_mapping_fetch import compute_monte_carlo_bands
+from tr_mapping_fetch import compute_monte_carlo_bands, MC_N_PATHS
 
 st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 
@@ -50,23 +50,12 @@ INSTRUMENT_LABELS = {
 # both sugar, then the two standalones.
 SHORTS = ['KC', 'RC', 'CC', 'LCC', 'SB', 'LSU', 'CT', 'OJ']
 
-# Rollex (this desk's own continuous roll-adjusted futures price) covers
-# KC/CT/SB/CC/LCC/LSU/RC — no OJ. GSCI_SHORTS is the opposite gap: LCC/LSU/RC
-# have no S&P GSCI single-commodity sub-index at all, so they exist as
-# Rollex-only instruments. See Code/tr_mapping_fetch.py's module docstring.
-ROLLEX_SHORTS = {'KC', 'CT', 'SB', 'CC', 'LCC', 'LSU', 'RC'}
-GSCI_SHORTS = {'KC', 'CT', 'SB', 'CC', 'OJ'}
-
-
-def effective_source(short: str, source_choice: str) -> str:
-    """Falls forward/back to whichever source the instrument actually has
-    data for, rather than showing an empty/broken tab: OJ has no Rollex (falls
-    back to GSCI), LCC/LSU/RC have no GSCI (fall forward to Rollex)."""
-    if source_choice == 'Rollex' and short not in ROLLEX_SHORTS:
-        return 'GSCI'
-    if source_choice == 'GSCI' and short not in GSCI_SHORTS:
-        return 'Rollex'
-    return source_choice
+# Rollex-only dashboard now — GSCI was dropped for KC/CT/SB/CC (saves data +
+# compute). The one exception is OJ: Rollex has no OJ coverage at all, so OJ
+# alone still runs on its historical GSCI sub-index. No user-facing source
+# toggle any more — each instrument has exactly one source, picked here.
+def instrument_source(short: str) -> str:
+    return 'GSCI' if short == 'OJ' else 'Rollex'
 
 ST_COLS_PREFIX = ('Mom_5', 'Mom_10', 'Mom_15', 'Mom_20', 'Mom_25')  # not used directly — full lists loaded from indicators columns
 
@@ -86,7 +75,7 @@ PLOTLY_TEMPLATE = 'plotly_white'
 # ── Data loading (cached) ────────────────────────────────────────────────────────
 
 _DATA_FILES = ['price_history.parquet', 'futures_price.parquet', 'indicators.parquet',
-              'sim_history.parquet']
+              'sim_history.parquet', 'active_labels.parquet']
 
 
 def _data_signature() -> tuple:
@@ -115,16 +104,23 @@ def load_all(_signature: tuple):
     sim_df['Run_Date'] = pd.to_datetime(sim_df['Run_Date'])
     sim_df['Horizon_Date'] = pd.to_datetime(sim_df['Horizon_Date'])
 
+    label_path = DATA_DIR / 'active_labels.parquet'
+    if label_path.exists():
+        label_df = pd.read_parquet(label_path)
+        label_df['Date'] = pd.to_datetime(label_df['Date'])
+    else:
+        label_df = pd.DataFrame(columns=['Commodity', 'Date', 'Active_Label'])
+
     # Defensive backward-compat: older cached/on-disk data without the Source
     # column (pre-Rollex) is treated as GSCI rather than crashing downstream.
     for df in (price_df, ind_df, sim_df):
         if 'Source' not in df.columns:
             df.insert(1, 'Source', 'GSCI')
 
-    return price_df, fut_df, ind_df, sim_df
+    return price_df, fut_df, ind_df, sim_df, label_df
 
 
-price_all, fut_all, ind_all, sim_all = load_all(_data_signature())
+price_all, fut_all, ind_all, sim_all, label_all = load_all(_data_signature())
 
 if ind_all.empty:
     st.error('No indicator data found in Database/indicators.parquet. Run Code/tr_mapping_fetch.py first.')
@@ -162,7 +158,9 @@ def get_instrument_data(short: str, source: str = 'GSCI'):
     """source: 'GSCI' or 'Rollex' — filters price_history/indicators/sim_history
     by Source in addition to Commodity. futures_price.parquet has no Source
     column (it's the raw front-month display price, only meaningful in GSCI
-    mode — Rollex mode uses its own price series as the display price too)."""
+    mode — Rollex mode uses its own price series as the display price too).
+    labels: Rollex's active-contract label (e.g. "Dec'26") indexed by Date,
+    single 'Active_Label' column — empty for GSCI-sourced instruments."""
     # price_history.parquet / futures_price.parquet use column 'Close' (Title Case);
     # rename to 'CLOSE' here so downstream chart/KPI code has one consistent name.
     price = (price_all[(price_all['Commodity'] == short) & (price_all['Source'] == source)]
@@ -173,7 +171,19 @@ def get_instrument_data(short: str, source: str = 'GSCI'):
              .sort_values('Date').set_index('Date'))
     sim   = (sim_all[(sim_all['Commodity'] == short) & (sim_all['Source'] == source)]
              .sort_values(['Run_Date', 'Horizon_Day']))
-    return price, fut, ind, sim
+    if source == 'Rollex' and not label_all.empty:
+        labels = (label_all[label_all['Commodity'] == short].sort_values('Date')
+                 .set_index('Date')[['Active_Label']])
+    else:
+        labels = pd.DataFrame(columns=['Active_Label'])
+    return price, fut, ind, sim, labels
+
+
+def latest_active_label(labels: pd.DataFrame) -> str | None:
+    if labels is None or labels.empty:
+        return None
+    v = labels['Active_Label'].iloc[-1]
+    return None if pd.isna(v) else str(v)
 
 
 def fmt_price(short: str, val: float) -> str:
@@ -226,15 +236,19 @@ def _fmt_cell(val, is_numeric: bool, is_signed: bool, decimals: int, num_fmt: st
     return str(val)
 
 
-def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.1f}', decimals: int = 1) -> str:
+def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.0f}', decimals: int = 0) -> str:
     """Renders a DataFrame as a fully inline-styled HTML table (no external CSS
     classes) — bordered header, zebra striping, right-aligned numerics, and
     green/red coloring on columns listed in signed_cols. Every numeric column
-    (signed or not) is rounded to a single consistent decimal count so nothing
-    shows raw float noise like 303.0118775986856."""
+    (signed or not) is rounded to a single consistent decimal count — whole
+    numbers by default (0 decimals); price columns are pre-formatted strings
+    (fmt_price, 1 decimal) upstream so they pass through unrounded here.
+    Table is NOT stretched to full width — columns size to their own content
+    (auto table layout), wrapped in a scrollable, inline-block container."""
     thead = "".join(
-        f'<th style="padding:5px 9px;background:#1f2937;color:#fff;font-size:0.68rem;'
-        f'text-transform:uppercase;letter-spacing:0.02em;text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{_fmt_header(c)}</th>'
+        f'<th style="padding:4px 8px;background:#1f2937;color:#fff;font-size:0.66rem;'
+        f'text-transform:uppercase;letter-spacing:0.02em;white-space:nowrap;'
+        f'text-align:{"right" if c in signed_cols or pd.api.types.is_numeric_dtype(df[c]) else "left"};">{_fmt_header(c)}</th>'
         for c in df.columns
     )
     rows_html = []
@@ -246,11 +260,11 @@ def html_table(df: pd.DataFrame, signed_cols: tuple = (), num_fmt: str = '{:+.1f
             is_numeric = isinstance(val, (int, float, np.floating, np.integer)) and not isinstance(val, bool)
             is_signed = c in signed_cols and is_numeric
             display = _fmt_cell(val, is_numeric, is_signed, decimals, num_fmt)
-            cells.append(f'<td style="{_cell_style(val, is_numeric, is_signed)}">{display}</td>')
+            cells.append(f'<td style="{_cell_style(val, is_numeric, is_signed)}white-space:nowrap;">{display}</td>')
         rows_html.append(f'<tr style="background:{bg};">{"".join(cells)}</tr>')
     return f"""
-    <div style="overflow-x:auto;border:1px solid #dfe3e8;border-radius:8px;">
-    <table style="width:100%;border-collapse:collapse;font-family:inherit;">
+    <div style="overflow-x:auto;border:1px solid #dfe3e8;border-radius:8px;display:inline-block;max-width:100%;">
+    <table style="width:auto;border-collapse:collapse;font-family:inherit;table-layout:auto;">
         <thead><tr>{thead}</tr></thead>
         <tbody>{"".join(rows_html)}</tbody>
     </table>
@@ -277,31 +291,35 @@ def _proj_sig_cell(v, bold: bool = False) -> str:
         if pd.isna(val):
             raise ValueError
     except Exception:
-        return '<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;color:#aaa;border-bottom:1px solid #f0f0f0;">—</td>'
+        return '<td style="padding:3px 6px;font-family:monospace;font-size:0.72rem;text-align:right;color:#aaa;border-bottom:1px solid #f0f0f0;white-space:nowrap;">—</td>'
     color = '#1b8a3d' if val > 0 else '#c62828' if val < 0 else '#555'
     weight = '700' if bold else '500'
-    return (f'<td style="padding:3px 8px;font-family:monospace;font-size:0.72rem;text-align:right;'
-            f'color:{color};font-weight:{weight};border-bottom:1px solid #f0f0f0;">{val * 100:+.1f}</td>')
+    return (f'<td style="padding:3px 6px;font-family:monospace;font-size:0.72rem;text-align:right;'
+            f'color:{color};font-weight:{weight};border-bottom:1px solid #f0f0f0;white-space:nowrap;">{val * 100:+.0f}</td>')
 
 
-def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str = None) -> str:
+def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str = None,
+                          active_label: str = None) -> str:
     """UP(day10->1) / UNCH / DOWN(1->10) projection table — mirrors the original
     Dash _projection_table() layout, always showing all 5 signals (ST/MT/LT/All/
     WAll) regardless of which one the chart is filtered to. Actual_Close is an
-    addition not present in the original (backfilled outcome for past horizons)."""
+    addition not present in the original (backfilled outcome for past horizons).
+    active_label (Rollex only): the currently-active contract, e.g. "Dec'26" —
+    shown next to the instrument label when the price is a Rollex futures price."""
     if sim_sel.empty:
         return '<div style="color:#888;font-size:0.82rem;">No simulation data.</div>'
 
-    decimals = 1  # fixed everywhere — was per-instrument (PRICE_DECIMALS)
+    decimals = 1  # price column stays 1 decimal — everything else in this table is 0
     s = sim_sel.set_index('Horizon_Day').sort_index()
     head_price = float(s['price_unch'].iloc[0])
     label = futures_name or short
+    label_suffix = f' · {active_label}' if active_label else ''
 
-    _TH = ('padding:4px 8px;font-size:0.68rem;color:#888;border-bottom:2px solid #dee2e6;'
-          'text-align:right;background:#f8f9fa;')
+    _TH = ('padding:3px 6px;font-size:0.66rem;color:#888;border-bottom:2px solid #dee2e6;'
+          'text-align:right;background:#f8f9fa;white-space:nowrap;')
     thead = (
         f'<tr><th style="{_TH}text-align:left;"></th>'
-        f'<th style="{_TH}text-align:left;">{label} <span style="color:#1976D2;">Last: {head_price:,.{decimals}f}</span></th>'
+        f'<th style="{_TH}text-align:left;">{label}{label_suffix} <span style="color:#1976D2;">Last: {head_price:,.{decimals}f}</span></th>'
         f'<th style="{_TH}">ST</th><th style="{_TH}">MT</th><th style="{_TH}">LT</th>'
         f'<th style="{_TH}">All</th><th style="{_TH}color:#7B1FA2;">WAll</th></tr>'
     )
@@ -345,12 +363,12 @@ def projection_table_html(sim_sel: pd.DataFrame, short: str, futures_name: str =
                + '<td style="border-bottom:none;"></td>' * 6 + '</tr>')
 
     return f"""
-    <div style="overflow-x:auto;">
-    <table style="border-collapse:collapse;width:100%;font-family:inherit;">
+    <div style="overflow-x:auto;display:inline-block;max-width:100%;">
+    <table style="border-collapse:collapse;width:auto;font-family:inherit;">
         <thead>{thead}</thead>
         <tbody>{"".join(rows)}</tbody>
     </table>
-    <div style="color:#aaa;font-size:0.65rem;margin-top:4px;">Signal columns scaled ×100 (range −100 to +100)</div>
+    <div style="color:#aaa;font-size:0.65rem;margin-top:4px;">Signal columns scaled ×100 (range −100 to +100), whole numbers</div>
     </div>
     """
 
@@ -408,19 +426,23 @@ def add_tuesday_lines(fig: go.Figure, idx: pd.DatetimeIndex, row=None, col=None)
 
 # ── Chart builders ────────────────────────────────────────────────────────────
 
-def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesdays: bool, source: str = 'GSCI'):
+def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesdays: bool, source: str = 'GSCI',
+                active_label: str = None):
     """GSCI mode: front-month futures is the primary line (falls back to the
     GSCI index if futures history is empty), GSCI shown as a thin secondary
     overlay since it's the actual signal-computation basis — matches the
     original Dash chart_price(). Rollex mode: a single line — rollex_px is
     already a continuous, roll-adjusted price that IS both the signal basis
     and a directly presentable price, so no separate futures/secondary-axis
-    overlay is needed."""
+    overlay is needed. active_label (Rollex only): current active contract,
+    e.g. "Dec'26", appended to the legend/title so the chart shows which
+    contract the price series is currently rolled onto."""
     fig = go.Figure()
     color = MKT_COLOR.get(short, '#1f77b4')
+    label_suffix = f" · {active_label}" if active_label else ''
 
     if source == 'Rollex':
-        fig.add_trace(go.Scatter(x=price.index, y=price['CLOSE'], name=f'{short} Rollex (roll-adjusted)',
+        fig.add_trace(go.Scatter(x=price.index, y=price['CLOSE'], name=f'{short} Rollex (roll-adjusted){label_suffix}',
                                  line=dict(color=color, width=1.8)))
         primary_index, primary_name = price.index, 'Rollex Price'
     else:
@@ -436,7 +458,7 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
     fig.update_layout(
         template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation='h', y=1.08), yaxis_title=primary_name,
-        title=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source})',
+        title=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source}{label_suffix})',
         xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),  # no weekend gaps
     )
     if show_tuesdays:
@@ -444,14 +466,35 @@ def chart_price(short: str, price: pd.DataFrame, fut: pd.DataFrame, show_tuesday
     return fig
 
 
-def chart_signals(ind: pd.DataFrame, show_cols: list[str], composite: str):
-    """Single selected composite + optional raw underlying signals (an addition
-    beyond the original, which only ever showed the 5 composites — see
-    chart_signals_all() for that). Scaled x100 to match the original's display
-    convention (range -100..+100) for visual consistency across the dashboard."""
+def _indicator_family(col: str) -> str:
+    """'Mom_5' -> 'Mom', 'MA_cross_(5, 10)' -> 'MA', '3MA_cross_(...)' -> '3MA',
+    etc. — the leading family name shared by every one of PARAMS' 10 indicator
+    families in Code/tr_mapping_fetch.py."""
+    return col.split('_', 1)[0]
+
+
+def chart_signals(ind: pd.DataFrame, composite: str, underlying_cols: list[str], detail: str = 'family'):
+    """Single selected composite plus an optional underlying-signal overlay.
+    detail:
+      'none'   — composite line only.
+      'family' — underlying signals bucketed/averaged by indicator family
+                 (Mom/MA/EMA/HMA/3MA/BB/DC/LRS/TRIX/KAMA — up to 10 lines)
+                 instead of every raw signal at once, so the chart stays
+                 readable instead of showing "sab shit together".
+      'raw'    — every underlying raw signal column (original behavior,
+                 up to 144 faint lines) for anyone who wants the full detail.
+    Scaled x100 to match the dashboard's -100..+100 display convention."""
     fig = go.Figure()
-    for col in show_cols:
-        fig.add_trace(go.Scatter(x=ind.index, y=ind[col] * 100, name=col, line=dict(width=0.8), opacity=0.35))
+    if detail == 'family':
+        fam_map: dict[str, list[str]] = {}
+        for col in underlying_cols:
+            fam_map.setdefault(_indicator_family(col), []).append(col)
+        for fam, cols in fam_map.items():
+            fam_avg = ind[cols].mean(axis=1) * 100
+            fig.add_trace(go.Scatter(x=ind.index, y=fam_avg, name=fam, line=dict(width=1.1), opacity=0.55))
+    elif detail == 'raw':
+        for col in underlying_cols:
+            fig.add_trace(go.Scatter(x=ind.index, y=ind[col] * 100, name=col, line=dict(width=0.8), opacity=0.35))
     fig.add_trace(go.Scatter(x=ind.index, y=ind[composite] * 100, name=composite,
                              line=dict(color='#1a237e', width=2.4)))
     fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)')
@@ -514,7 +557,7 @@ def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: 
     if cache_key in cache:
         return cache[cache_key]
 
-    price, _, _, _ = get_instrument_data(short, source)
+    price, _, _, _, _ = get_instrument_data(short, source)
     if price.empty:
         cache[cache_key] = pd.DataFrame()
         return cache[cache_key]
@@ -538,11 +581,14 @@ def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: 
 
 
 def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
-                     ind: pd.DataFrame = None, mc_bands: pd.DataFrame = None):
-    """Historical trailing signal (last 7 actual days) feeding into a 3-scenario
-    10-day fan, with price labels at each node — matches the original Dash
-    chart_projection() (single chart, not a 2-row subplot; price shown as text
-    labels rather than a separate price panel)."""
+                     ind: pd.DataFrame = None, mc_bands: pd.DataFrame = None, hist_df: pd.DataFrame = None):
+    """Historical trailing signal feeding into a 3-scenario 10-day fan, with
+    price labels at each node — matches the original Dash chart_projection()
+    (single chart, not a 2-row subplot; price shown as text labels rather than
+    a separate price panel). By default shows the last 7 actual days of
+    history (ind.tail(7)); pass hist_df (e.g. the sidebar's full date-range
+    selection) to show a longer trailing history feeding into the same
+    projection fan instead — used by the 'Full History + Projection' sub-tab."""
     if sim_sel.empty:
         return go.Figure()
 
@@ -558,8 +604,11 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
 
     color = MKT_COLOR.get(short, '#1f77b4')
     sig_col = f'{signal_col}_Avg'
-    hist_sig = (ind[[sig_col]].tail(7) if ind is not None and not ind.empty and sig_col in ind.columns
-               else pd.DataFrame())
+    if hist_df is not None and not hist_df.empty and sig_col in hist_df.columns:
+        hist_sig = hist_df[[sig_col]]
+    else:
+        hist_sig = (ind[[sig_col]].tail(7) if ind is not None and not ind.empty and sig_col in ind.columns
+                   else pd.DataFrame())
     anchor_date = hist_sig.index[-1] if not hist_sig.empty else sim_sel['Horizon_Date'].min()
     last_sig_val = _safe_round(hist_sig[sig_col].iloc[-1], scale=100) if not hist_sig.empty else 0
     if last_sig_val is None:
@@ -706,14 +755,15 @@ def _safe_val(series: pd.Series, offset: int = 0) -> float:
     return float(series.iloc[idx]) if idx >= 0 else np.nan
 
 
-def overview_row(short: str, source: str) -> dict:
-    eff = effective_source(short, source)
-    price, fut, ind, sim = get_instrument_data(short, eff)
+def overview_row(short: str) -> dict:
+    eff = instrument_source(short)
+    price, fut, ind, sim, labels = get_instrument_data(short, eff)
     if ind.empty:
         return {'Commodity': short, 'Label': INSTRUMENT_LABELS.get(short, short)}
     last = ind.iloc[-1]
     # Rollex's own price doubles as the display price (see chart_price()); GSCI
     # mode uses the separate raw futures_price table.
+    label = latest_active_label(labels)
     if eff == 'Rollex':
         fut_last = price['CLOSE'].iloc[-1] if not price.empty else np.nan
     else:
@@ -733,10 +783,11 @@ def overview_row(short: str, source: str) -> dict:
     # x100 scale, 1 decimal — matches the KPI strip/projection table/charts
     # elsewhere in the dashboard (was raw -1..1 with 3 decimals, the one place
     # that didn't match everything else's display convention).
+    fut_price_display = fmt_price(short, fut_last) + (f' ({label})' if label else '')
     return {
         'Commodity': short,
         'Label': INSTRUMENT_LABELS.get(short, short),
-        'Futures Price': fmt_price(short, fut_last),
+        'Futures Price': fut_price_display,
         'ST_Avg': round(last['ST_Avg'] * 100, 1),
         'MT_Avg': round(last['MT_Avg'] * 100, 1),
         'LT_Avg': round(last['LT_Avg'] * 100, 1),
@@ -751,6 +802,13 @@ def overview_row(short: str, source: str) -> dict:
     }
 
 # ── Sidebar navigation ──────────────────────────────────────────────────────────
+#
+# No Run Date picker and no Monte Carlo path-count control any more — the app
+# always runs/displays the latest available date+run only (saves computing
+# every historical run date on every page load), and MC paths are fixed at
+# MC_N_PATHS (200), not user-selectable. No Signal Source toggle either — the
+# dashboard is Rollex-only now except OJ (no Rollex coverage), which always
+# uses GSCI automatically (instrument_source()) rather than a user choice.
 
 st.sidebar.markdown(
     """<div style="padding:4px 0 12px 0;">
@@ -762,24 +820,32 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-source_choice = st.sidebar.radio(
-    'Signal Source', ['GSCI', 'Rollex'], index=0, key='source_choice',
-    help=('GSCI: S&P GSCI single-commodity sub-index (Romain\'s original methodology, all 5 '
-         'instruments, history from ~2006).\n\n'
-         'Rollex: this desk\'s own continuous roll-adjusted futures price — KC/CT/SB/CC only '
-         '(no OJ), history from ~2010. Same indicator math, different underlying price series, '
-         'so signal values differ from GSCI.'),
-)
-st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
 
-_eff_for_picker = effective_source(selected_instrument, source_choice)
-_price_for_picker, _, _ind_for_picker, _sim_for_picker = get_instrument_data(selected_instrument, _eff_for_picker)
+_eff_for_picker = instrument_source(selected_instrument)
+_price_for_picker, _, _ind_for_picker, _sim_for_picker, _ = get_instrument_data(selected_instrument, _eff_for_picker)
 
-# ── Latest data by instrument — right under the Instrument picker ──────────────
+# Date range — one global (sidebar) control instead of a separate picker on
+# each of the Charts/Weekly Change/All Signals sub-views (every instrument's
+# usable range is roughly the same anyway). Bounds come from whichever
+# instrument is currently selected.
+if not _ind_for_picker.empty:
+    sidebar_rng_start, sidebar_rng_end = get_date_range(_ind_for_picker, 'sidebar_daterange')
+else:
+    sidebar_rng_start, sidebar_rng_end = None, None
+
+
+def apply_sidebar_range(df: pd.DataFrame) -> pd.DataFrame:
+    if sidebar_rng_start is None or df.empty:
+        return df
+    return apply_range(df, sidebar_rng_start, sidebar_rng_end)
+
+
+# ── Latest data by instrument — pinned to the BOTTOM of the sidebar ────────────
 # Computed fresh from ind_all every run (the same frame everything else reads,
 # loaded via the mtime-cache-busted load_all()) rather than a separately
 # cached value, so it can't silently go stale on its own.
+st.sidebar.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
 st.sidebar.markdown(
     '<div style="font-size:0.66rem;color:#888;text-transform:uppercase;letter-spacing:0.03em;'
     'border-top:1px solid #e0e0e0;padding-top:8px;margin-top:4px;margin-bottom:4px;">Latest Data by Instrument</div>',
@@ -799,61 +865,16 @@ for _s in SHORTS:
     )
 st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
 
-# Date range — one global (sidebar) control instead of a separate picker on
-# each of the Charts/Weekly Change/All Signals sub-views (every instrument's
-# usable range is roughly the same anyway). Bounds come from whichever
-# instrument is currently selected.
-st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-if not _ind_for_picker.empty:
-    sidebar_rng_start, sidebar_rng_end = get_date_range(_ind_for_picker, 'sidebar_daterange')
-else:
-    sidebar_rng_start, sidebar_rng_end = None, None
-
-
-def apply_sidebar_range(df: pd.DataFrame) -> pd.DataFrame:
-    if sidebar_rng_start is None or df.empty:
-        return df
-    return apply_range(df, sidebar_rng_start, sidebar_rng_end)
-
-
-# Monte Carlo path count and simulation run date — both global (sidebar)
-# controls too, rather than per-tab widgets, since they only ever apply to
-# whichever instrument is selected above.
-st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-mc_n_paths = st.sidebar.number_input(
-    'Monte Carlo Paths (N)', min_value=50, max_value=500, value=200, step=50, key='mc_n_paths',
-    help='Number of bootstrapped price paths for the Monte Carlo signal bands '
-         '(Instrument tab -> Projection).',
-)
-
-_run_dates_for_picker = (sorted(_sim_for_picker['Run_Date'].unique(), reverse=True)
-                        if not _sim_for_picker.empty else [])
-run_date_choice = (
-    st.sidebar.selectbox('Run Date', _run_dates_for_picker, index=0,
-                         format_func=lambda d: pd.Timestamp(d).date().isoformat(), key='run_date_picker')
-    if _run_dates_for_picker else None
-)
-# Run Date is the day the script ran, not necessarily the day the price data
-# is FROM (the LSEG feed can lag) — show which price date was actually used,
-# via an as-of lookup (last price_history row on/before Run Date) so this is
-# correct for older Run Dates too, not just the latest.
-if run_date_choice is not None and not _price_for_picker.empty:
-    _asof = _price_for_picker.index[_price_for_picker.index <= run_date_choice]
-    if len(_asof) > 0:
-        st.sidebar.caption(f'Priced as of: {_asof[-1].date().isoformat()}')
-
 tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
 
 with tabs[1]:
-    st.markdown(section_header(f'Overview — All Instruments ({source_choice})',
-                               'Latest composite trend signals — Rollex rows fall back to GSCI for OJ'
-                               if source_choice == 'Rollex' else
-                               'Latest composite trend signals across the GSCI sub-index universe'),
+    st.markdown(section_header('Overview — All Instruments',
+                               'Latest composite trend signals — Rollex, except OJ (GSCI, no Rollex coverage)'),
                unsafe_allow_html=True)
-    rows = [overview_row(s, source_choice) for s in SHORTS]
+    rows = [overview_row(s) for s in SHORTS]
     overview_df = pd.DataFrame(rows)
 
     # KPI cards folded into the table below (they showed the same WAll_Avg/Δ
@@ -870,27 +891,27 @@ with tabs[1]:
 
 with tabs[2]:
     st.markdown(section_header('All Projections — Latest Simulation Run',
-                               '10-business-day forward scenarios (up / down / unchanged) per instrument'),
+                               '10-business-day forward scenarios (up / down / unchanged), with Monte Carlo '
+                               'bootstrapped bands (20-day lookback, 200 paths), per instrument'),
                unsafe_allow_html=True)
     signal_choice = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'], horizontal=True, key='allproj_signal')
     for s in SHORTS:
-        eff = effective_source(s, source_choice)
-        price, fut, ind, sim = get_instrument_data(s, eff)
+        eff = instrument_source(s)
+        price, fut, ind, sim, labels = get_instrument_data(s, eff)
         if sim.empty:
             continue
         latest_run = sim['Run_Date'].max()
         sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
-        fallback_note = f'  *(showing {eff} — no {source_choice} coverage)*' if eff != source_choice else ''
-        _asof_px = price.index[price.index <= latest_run]
-        _asof_note = (f' <span style="color:#888;font-size:0.78rem;font-style:italic;">'
-                     f'(as of latest date on which it was run: {_asof_px[-1].date()})</span>'
-                     if len(_asof_px) > 0 else '')
-        st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}** (run date: {latest_run.date()}){_asof_note}{fallback_note}",
-                   unsafe_allow_html=True)
-        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind),
+        label = latest_active_label(labels)
+        label_note = f' <span style="color:#888;font-size:0.78rem;">· {label}</span>' if label else ''
+        oj_note = (' <span style="color:#888;font-size:0.78rem;font-style:italic;">(GSCI — no Rollex coverage)</span>'
+                  if s == 'OJ' else '')
+        st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}**{label_note}{oj_note}", unsafe_allow_html=True)
+        mc_bands = get_monte_carlo_bands(s, eff, str(ind.index.max()), MC_N_PATHS) if not ind.empty else None
+        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind, mc_bands=mc_bands),
                         width='stretch', key=f'allproj_chart_{s}')
         st.markdown(
-            projection_table_html(sim_latest, s),
+            projection_table_html(sim_latest, s, active_label=label),
             unsafe_allow_html=True,
         )
 
@@ -901,17 +922,17 @@ with tabs[3]:
                                'Each instrument\'s own ST/MT/LT/All/WAll composites, stacked'),
                unsafe_allow_html=True)
     for s in SHORTS:
-        eff = effective_source(s, source_choice)
-        _, _, ind, _ = get_instrument_data(s, eff)
+        eff = instrument_source(s)
+        _, _, ind, _, _ = get_instrument_data(s, eff)
         if ind.empty:
             continue
         ind_ranged = apply_sidebar_range(ind)
-        fallback_note = (f'<span style="color:#c62828;margin-left:6px;font-size:0.72rem;">'
-                         f'(showing {eff} — no {source_choice} coverage)</span>') if eff != source_choice else ''
+        oj_note = (f'<span style="color:#888;margin-left:6px;font-size:0.72rem;font-style:italic;">'
+                  f'(GSCI — no Rollex coverage)</span>') if s == 'OJ' else ''
         st.markdown(
             f'<div style="border-bottom:2px solid {MKT_COLOR.get(s, "#333")};padding-bottom:3px;margin:6px 0;">'
             f'<span style="font-weight:700;color:{MKT_COLOR.get(s, "#333")};">{s}</span>'
-            f'<span style="color:#888;margin-left:6px;">{INSTRUMENT_LABELS[s]}</span>{fallback_note}</div>',
+            f'<span style="color:#888;margin-left:6px;">{INSTRUMENT_LABELS[s]}</span>{oj_note}</div>',
             unsafe_allow_html=True,
         )
         st.plotly_chart(chart_signals_all(ind_ranged, s), width='stretch', key=f'allsig_chart_{s}')
@@ -920,16 +941,28 @@ with tabs[3]:
 
 for short in [selected_instrument]:  # loops exactly once — keeps the body's indentation as-is
     with tabs[0]:
-        eff = effective_source(short, source_choice)
-        price, fut, ind, sim = get_instrument_data(short, eff)
+        eff = instrument_source(short)
+        price, fut, ind, sim, labels = get_instrument_data(short, eff)
         if ind.empty:
             st.warning(f'No data for {short}.')
             continue
+        active_label = latest_active_label(labels)
 
-        if eff != source_choice:
-            st.caption(f'No {source_choice} coverage for {short} — showing {eff}.')
+        if short == 'OJ':
+            st.caption('OJ has no Rollex coverage — running on GSCI (the one exception in an otherwise Rollex-only dashboard).')
 
-        sub_charts, sub_weekly, sub_proj = st.tabs(['Charts', 'Weekly Change', 'Projection'])
+        # Run date is always the latest available — no picker any more (saves
+        # computing every historical run date on every page load). Monte Carlo
+        # bands are preloaded/shown by default for the Projection views below —
+        # no opt-in checkbox — fixed at MC_N_PATHS (200) paths, 20-day returns
+        # lookback (see Code/tr_mapping_fetch.py's compute_monte_carlo_bands()).
+        run_dates = sorted(sim['Run_Date'].unique(), reverse=True) if not sim.empty else []
+        run_choice = run_dates[0] if run_dates else None
+        mc_bands = (get_monte_carlo_bands(short, eff, str(ind.index.max()), MC_N_PATHS)
+                   if not ind.empty else pd.DataFrame())
+
+        sub_charts, sub_weekly, sub_proj, sub_full = st.tabs(
+            ['Charts', 'Weekly Change', 'Projection', 'Full History + Projection'])
 
         with sub_charts:
             show_tues = False  # "Show Tuesday lines" checkbox hidden for now — add_tuesday_lines() kept in code to re-enable later
@@ -938,17 +971,25 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             # date-filtered primary line.
             price_ranged = apply_sidebar_range(price)
             fut_ranged = apply_sidebar_range(fut)
-            st.plotly_chart(chart_price(short, price_ranged, fut_ranged, show_tues, source=eff),
+            st.plotly_chart(chart_price(short, price_ranged, fut_ranged, show_tues, source=eff,
+                                        active_label=active_label),
                             width='stretch', key=f'{short}_pricechart')
 
             composite = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
                                  horizontal=True, key=f'{short}_composite')
             col_map = {'ST_Avg': ST_COLS, 'MT_Avg': MT_COLS, 'LT_Avg': LT_COLS,
                       'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
-            show_underlying = st.checkbox('Show underlying signals', value=False, key=f'{short}_underlying')
+            # Bucketed/aggregated slicer instead of a single "show all 144 raw
+            # signals at once" checkbox — 'By Family' averages each indicator
+            # family (Mom/MA/EMA/HMA/3MA/BB/DC/LRS/TRIX/KAMA) into one line
+            # each, so the underlying detail stays readable.
+            detail_choice = st.radio(
+                'Underlying detail', ['None', 'By Family (avg)', 'All raw signals'],
+                index=1, horizontal=True, key=f'{short}_detail',
+            )
+            detail_map = {'None': 'none', 'By Family (avg)': 'family', 'All raw signals': 'raw'}
             ind_ranged = apply_sidebar_range(ind)
-            underlying = col_map[composite] if show_underlying else []
-            st.plotly_chart(chart_signals(ind_ranged, underlying, composite),
+            st.plotly_chart(chart_signals(ind_ranged, composite, col_map[composite], detail=detail_map[detail_choice]),
                             width='stretch', key=f'{short}_sigchart')
 
         with sub_weekly:
@@ -980,30 +1021,29 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             else:
                 proj_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
                                        horizontal=True, key=f'{short}_projsignal')
-                # Run date + Monte Carlo path count are both sidebar (global)
-                # controls now — run_date_choice already defaults to the
-                # latest available run for this instrument.
-                run_dates = sorted(sim['Run_Date'].unique(), reverse=True)
-                run_choice = run_date_choice if run_date_choice in run_dates else run_dates[0]
                 sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
-
-                show_mc = st.checkbox(
-                    'Show Monte Carlo bands', value=False, key=f'{short}_mc_toggle',
-                    help='Bootstraps N random 10-day price paths from the last 500 trading days '
-                         '(~2 years) of daily returns and recomputes the full indicator set on '
-                         'each (all N paths at once, vectorized) — gives a probabilistic p10-p90 '
-                         '/ p25-p75 range instead of the 3 deterministic UP/DOWN/UNCH scenarios. '
-                         'N is set in the sidebar. Cached per run date.',
-                )
-                mc_bands = None
-                if show_mc and run_choice == run_dates[0]:
-                    last_date_str = ind.index.max().isoformat()
-                    mc_bands = get_monte_carlo_bands(short, eff, last_date_str, mc_n_paths)
-                    if mc_bands.empty:
-                        st.warning('Not enough history to run Monte Carlo for this instrument.')
-                elif show_mc:
-                    st.caption('Monte Carlo bands are only available for the latest run date.')
-
+                if mc_bands.empty:
+                    st.caption('Not enough history to run Monte Carlo for this instrument.')
                 st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
                                 width='stretch', key=f'{short}_projchart')
-                st.markdown(projection_table_html(sim_sel, short), unsafe_allow_html=True)
+                st.markdown(projection_table_html(sim_sel, short, active_label=active_label), unsafe_allow_html=True)
+
+        with sub_full:
+            # Combined long-history + projection-tail view: the actual
+            # historical signal across the sidebar's globally-selected date
+            # range, with the same 10-day Monte Carlo fan attached at the end
+            # — distinct from the Projection sub-tab above, which only shows a
+            # short 7-day trailing history before the fan.
+            if sim.empty:
+                st.info('No simulation history for this instrument.')
+            else:
+                st.caption('Full signal history (per the sidebar date range) with the Monte Carlo projection fan attached at the end.')
+                full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
+                                       horizontal=True, key=f'{short}_fullsignal')
+                ind_ranged_full = apply_sidebar_range(ind)
+                sim_sel_full = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
+                st.plotly_chart(
+                    chart_projection(sim_sel_full, price, full_signal, short, ind=ind,
+                                     mc_bands=mc_bands, hist_df=ind_ranged_full),
+                    width='stretch', key=f'{short}_fullprojchart',
+                )

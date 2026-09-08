@@ -1,6 +1,6 @@
 """
-tr_mapping_fetch.py — Fetch LSEG data, compute CTA trend-following indicators,
-build simulation scenarios and maintain simulation history for GSCI commodity indices.
+tr_mapping_fetch.py — Fetch LSEG/Rollex data, compute CTA trend-following indicators,
+build simulation scenarios and maintain simulation history (Rollex-only, except OJ on GSCI).
 
 Data policy: only get_history is used (daily closes).  Run each morning to pick up
 the previous day's close.  No intraday fetching.
@@ -14,6 +14,8 @@ original "TR mapping old" version this was converted from):
     Database/sim_history.parquet     Commodity, Source, Run_Date, Horizon_Date, Horizon_Day,
                                       ST/MT/LT/All/WAll _down/_up/_unch, price_down/up/unch,
                                       Actual_Close
+    Database/active_labels.parquet   Commodity, Date, Active_Label   (Rollex's active-contract
+                                      label, e.g. "Dec'26" — Rollex-sourced instruments only)
 
 No pandas_ta anywhere in this file — it pulls in numba unconditionally, and
 numba has no published wheel for some Python versions Streamlit Cloud may run
@@ -29,17 +31,18 @@ Dashboard/app.py for the live, on-demand Monte Carlo feature this enables
 (N=100 in ~2s, N=500 in ~11s — fast enough to run in the dashboard itself,
 no ingest-side batch step needed).
 
-Two signal sources per instrument, selectable in the dashboard:
-    GSCI   — S&P GSCI single-commodity sub-index (.SPGSKCP etc), all 5 instruments,
-             history from ~2006. Matches Romain's original methodology exactly.
-    Rollex — this desk's own continuous roll-adjusted futures price (rollex_px),
-             read directly from the sibling LSEG-Rollex project's own parquet
-             output (cross-repo read, no re-fetch — Rollex maintains its own
-             data). Only KC/CT/SB/CC are covered (Rollex has no OJ); history
-             from ~2010. Same 144-indicator math applies unchanged — it's
-             return/crossing-based, so it's source-agnostic — but the actual
-             signal VALUES differ between sources because GSCI's and Rollex's
-             roll methodologies differ.
+Signal source is Rollex-only now, with one exception: OJ has no Rollex
+coverage at all, so OJ alone still runs on GSCI (its historical S&P GSCI
+single-commodity sub-index, .SPGSOJP). GSCI was originally wired up for all 5
+of Romain's original instruments (KC/CT/SB/CC/OJ), but has since been dropped
+for KC/CT/SB/CC to save data storage and compute — Rollex (this desk's own
+continuous roll-adjusted futures price, rollex_px) is the sole source for
+KC/CT/SB/CC/LCC/LSU/RC, read directly from the sibling LSEG-Rollex project's
+own parquet output (cross-repo read, no re-fetch — Rollex maintains its own
+data; also carries an active_label column, e.g. "Dec'26", read alongside
+rollex_px and stored in Database/active_labels.parquet for display). Same
+144-indicator math applies unchanged regardless of source — it's return/
+crossing-based, so it's source-agnostic.
 
 Usage:
     python tr_mapping_fetch.py                    # incremental update (run next morning)
@@ -65,7 +68,8 @@ PRICE_FILE    = DATA_DIR / 'price_history.parquet'
 FUTPX_FILE    = DATA_DIR / 'futures_price.parquet'
 IND_FILE      = DATA_DIR / 'indicators.parquet'
 SIM_FILE      = DATA_DIR / 'sim_history.parquet'
-MC_N_PATHS    = 200  # vectorized across all N paths at once (calculate_indicators_multi) -> ~4s/instrument/source
+LABEL_FILE    = DATA_DIR / 'active_labels.parquet'  # Rollex active-contract label (e.g. "Dec'26"), Commodity/Date/Active_Label
+MC_N_PATHS    = 200  # fixed — vectorized across all N paths at once (calculate_indicators_multi) -> ~4s/instrument/source
 
 # Rollex is a sibling LSEG-* project (own repo, own automator) — CTA only ever
 # READS its parquet output, never writes to it. BASE_DIR is CTA's own root, so
@@ -93,14 +97,18 @@ class Instrument:
     label:       str          # 'Coffee'
 
 INSTRUMENTS = [
-    Instrument('KC', '.SPGSKCP', 'KCv1', 0, 'Coffee'),
-    Instrument('CT', '.SPGSCTP', 'CTv1', 1, 'Cotton'),
-    Instrument('SB', '.SPGSSBP', 'SBv1', 1, 'Sugar'),
-    Instrument('CC', '.SPGSCCP', 'CCv1', 0, 'Cocoa'),
+    # KC/CT/SB/CC: GSCI dropped — Rollex is the sole source now (saves data
+    # storage + compute). gsci_ric/futures_ric are None so the GSCI half of
+    # main()'s pipeline is skipped entirely for these.
+    Instrument('KC', None, None, 0, 'Coffee'),
+    Instrument('CT', None, None, 1, 'Cotton'),
+    Instrument('SB', None, None, 1, 'Sugar'),
+    Instrument('CC', None, None, 0, 'Cocoa'),
+    # OJ: the one exception — Rollex has no OJ coverage at all, so OJ keeps
+    # running on its historical GSCI sub-index (.SPGSOJP) as its only source.
     Instrument('OJ', '.SPGSOJP', 'OJv1', 1, 'Orange Juice'),
-    # Rollex-only — no S&P GSCI single-commodity sub-index exists for these
-    # London-listed ICE contracts, so gsci_ric/futures_ric are both None and
-    # the GSCI half of main()'s pipeline is skipped entirely for them.
+    # Rollex-only — no S&P GSCI single-commodity sub-index ever existed for
+    # these London-listed ICE contracts.
     Instrument('LCC', None, None, 0, 'London Cocoa'),
     Instrument('LSU', None, None, 1, 'London Sugar'),
     Instrument('RC',  None, None, 0, 'Robusta Coffee'),
@@ -234,6 +242,24 @@ def get_last_price_date(inst: Instrument, source: str = 'GSCI'):
     if sub.empty:
         return None
     return pd.Timestamp(pd.to_datetime(sub['Date']).max())
+
+
+def upsert_active_labels(inst: Instrument, df: pd.DataFrame) -> None:
+    """df: DatetimeIndex named Date, single 'Active_Label' column — the Rollex
+    active-contract label (e.g. "Dec'26") as of each date. Rollex-only; no
+    Source column needed since GSCI never carries this."""
+    if df.empty:
+        return
+    rows = df.reset_index()[['Date', 'Active_Label']].copy()
+    rows.insert(0, 'Commodity', inst.short)
+    rows = rows.dropna(subset=['Active_Label'])
+    if rows.empty:
+        return
+    old = _load(LABEL_FILE)
+    combined = pd.concat([old, rows], ignore_index=True) if not old.empty else rows
+    combined = combined.drop_duplicates(subset=['Commodity', 'Date'], keep='last')
+    combined = combined.sort_values(['Commodity', 'Date']).reset_index(drop=True)
+    combined.to_parquet(LABEL_FILE, index=False)
 
 
 def upsert_indicators(inst: Instrument, df: pd.DataFrame, source: str = 'GSCI') -> None:
@@ -757,18 +783,32 @@ def fetch_price_history(inst: Instrument, full_refresh: bool = False) -> pd.Data
 def fetch_rollex_price(inst: Instrument) -> pd.DataFrame:
     """Read the sibling LSEG-Rollex project's continuous roll-adjusted price
     (rollex_px) directly from its own parquet — CTA never fetches or writes
-    this itself, Rollex's own automator keeps it current. Returns a DataFrame
-    indexed by Date with a single CLOSE column, or empty if unavailable."""
+    this itself, Rollex's own automator keeps it current. Also reads Rollex's
+    own active_label column (e.g. "Dec'26" — the currently-active contract)
+    alongside rollex_px and upserts it separately into active_labels.parquet
+    for display (futures price tables/charts). Returns a DataFrame indexed by
+    Date with a single CLOSE column, or empty if unavailable."""
     path = ROLLEX_DB_DIR / f'rollex_{inst.short}.parquet'
     if not path.exists():
         print(f'  [{inst.short}] Rollex file not found at {path} — skipping Rollex source')
         return pd.DataFrame(columns=['CLOSE'])
+    want_cols = ['rollex_px', 'active_label']
     try:
-        raw = pd.read_parquet(path, columns=['rollex_px'])
+        raw = pd.read_parquet(path)
+        have_cols = [c for c in want_cols if c in raw.columns]
+        raw = raw[have_cols]
     except Exception as e:
         print(f'  [{inst.short}] Rollex read error: {e} — skipping Rollex source')
         return pd.DataFrame(columns=['CLOSE'])
-    df = raw.rename(columns={'rollex_px': 'CLOSE'}).dropna()
+
+    if 'active_label' in raw.columns:
+        label_df = raw[['active_label']].rename(columns={'active_label': 'Active_Label'}).dropna()
+        label_df.index = pd.to_datetime(label_df.index)
+        label_df.index.name = 'Date'
+        if not label_df.empty:
+            upsert_active_labels(inst, label_df.sort_index())
+
+    df = raw[['rollex_px']].rename(columns={'rollex_px': 'CLOSE'}).dropna()
     df.index = pd.to_datetime(df.index)
     df.index.name = 'Date'
     df = df.sort_index()
@@ -1012,6 +1052,13 @@ def reset_sim_history() -> None:
 # per-path-loop's ~2.3s PER PATH (N=50 alone took ~47s). Fast enough to run
 # live in the dashboard on demand — no longer needs to be an ingest-only,
 # once-a-day batch step.
+#
+# Returns pool: last 20 trading days only (not the long-run ~2yr/500-day
+# window this used before) — deliberately captures the CURRENT/latest
+# volatility regime rather than averaging over a long history that may no
+# longer be representative.
+
+MC_LOOKBACK_DAYS = 20  # trading days of historical returns the bootstrap draws from
 
 def compute_monte_carlo_bands(price_df: pd.DataFrame, n_paths: int = MC_N_PATHS,
                               horizon: int = 10, seed: int = 42, progress_cb=None) -> pd.DataFrame:
@@ -1020,8 +1067,8 @@ def compute_monte_carlo_bands(price_df: pd.DataFrame, n_paths: int = MC_N_PATHS,
     base = price_df['CLOSE'].tail(1500).copy()
     if len(base) < 300:
         return pd.DataFrame()
-    hist_returns = base.pct_change().dropna().tail(500).to_numpy()
-    if len(hist_returns) < 50:
+    hist_returns = base.pct_change().dropna().tail(MC_LOOKBACK_DAYS).to_numpy()
+    if len(hist_returns) < 10:
         return pd.DataFrame()
 
     rng = np.random.default_rng(seed)
