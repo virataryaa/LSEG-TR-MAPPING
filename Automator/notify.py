@@ -12,7 +12,7 @@ from pathlib import Path
 
 TO_EMAIL = "virat.arya@etgworld.com"
 DB_DIR   = Path(r"C:\Users\virat.arya\ETG\SoftsDatabase - Documents\Database\Hardmine\LSEG\CTA\Database")
-SHORTS   = ["KC", "CT", "SB", "CC", "OJ"]
+SHORTS   = ["KC", "RC", "CC", "LCC", "SB", "LSU", "CT", "OJ"]  # matches Dashboard/app.py's order
 
 status     = sys.argv[1] if len(sys.argv) > 1 else "ok"
 git_status = sys.argv[2] if len(sys.argv) > 2 else "unknown"
@@ -21,23 +21,36 @@ today      = datetime.date.today().strftime("%Y-%m-%d")
 
 
 def indicator_summary() -> str:
+    """One line per (instrument, source) — GSCI and Rollex last-date/signal
+    shown separately, same as the dashboard sidebar's 'Latest Data by
+    Instrument'. Not every instrument has both (OJ is GSCI-only, LCC/LSU/RC
+    are Rollex-only)."""
     lines = []
     path = DB_DIR / "indicators.parquet"
     if not path.exists():
         return "  indicators.parquet NOT FOUND"
     df = pd.read_parquet(path)
     df["Date"] = pd.to_datetime(df["Date"])
+    if "Source" not in df.columns:
+        df["Source"] = "GSCI"
     for short in SHORTS:
-        sub = df[df["Commodity"] == short].sort_values("Date")
+        sub = df[df["Commodity"] == short]
         if sub.empty:
             lines.append(f"  {short:<4}  NO DATA")
             continue
-        last = sub.iloc[-1]
-        lines.append(
-            f"  {short:<4}  {len(sub):>5} rows   last={last['Date'].date()}   "
-            f"ST={last['ST_Avg']:+.3f}  MT={last['MT_Avg']:+.3f}  "
-            f"LT={last['LT_Avg']:+.3f}  WAll={last['WAll_Avg']:+.3f}"
-        )
+        first = True
+        for src in ("GSCI", "Rollex"):
+            s = sub[sub["Source"] == src].sort_values("Date")
+            if s.empty:
+                continue
+            last = s.iloc[-1]
+            label = f"{short:<4}" if first else "    "
+            lines.append(
+                f"  {label}  {src:<6} last={last['Date'].date()}   "
+                f"ST={last['ST_Avg']:+.3f}  MT={last['MT_Avg']:+.3f}  "
+                f"LT={last['LT_Avg']:+.3f}  WAll={last['WAll_Avg']:+.3f}"
+            )
+            first = False
     return "\n".join(lines)
 
 
@@ -75,10 +88,6 @@ CTA TREND SIGNAL SUMMARY
 {"=" * 60}
 {indicator_summary()}
 {"=" * 60}
-Note: CTA trend-following signal pipeline, converted from Romain's "TR mapping
-old" tool to the Hardminer architecture (Parquet data, Streamlit dashboard).
-Indicator math (144 signals, ST/MT/LT/WAll composites) is unchanged from the
-original.
 
 Log: C:\\Users\\virat.arya\\ETG\\SoftsDatabase - Documents\\Database\\Hardmine\\LSEG\\CTA\\Automator\\run_log.txt
 """
