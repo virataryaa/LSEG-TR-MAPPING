@@ -979,7 +979,7 @@ for _s in SHORTS:
     )
 st.sidebar.markdown(''.join(_latest_rows), unsafe_allow_html=True)
 
-tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Projections', 'All Signals']
+tab_names = [f'Instrument ({INSTRUMENT_LABELS[selected_instrument]})', 'Overview', 'All Signals']
 tabs = st.tabs(tab_names)
 
 # ── Overview tab ──────────────────────────────────────────────────────────────
@@ -1001,37 +1001,9 @@ with tabs[1]:
         unsafe_allow_html=True,
     )
 
-# ── All Projections tab ──────────────────────────────────────────────────────
-
-with tabs[2]:
-    st.markdown(section_header('All Projections — Latest Simulation Run',
-                               '10-business-day forward scenarios (up / down / unchanged), with Monte Carlo '
-                               'bootstrapped bands (20-day lookback, 200 paths), per instrument'),
-               unsafe_allow_html=True)
-    signal_choice = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'], horizontal=True, key='allproj_signal')
-    for s in SHORTS:
-        eff = instrument_source(s)
-        price, fut, ind, sim, labels = get_instrument_data(s, eff)
-        if sim.empty:
-            continue
-        latest_run = sim['Run_Date'].max()
-        sim_latest = sim[sim['Run_Date'] == latest_run].sort_values('Horizon_Day')
-        label = latest_active_label(labels)
-        label_note = f' <span style="color:#888;font-size:0.78rem;">· {label}</span>' if label else ''
-        oj_note = (' <span style="color:#888;font-size:0.78rem;font-style:italic;">(GSCI — no Rollex coverage)</span>'
-                  if s == 'OJ' else '')
-        st.markdown(f"**{s} — {INSTRUMENT_LABELS[s]}**{label_note}{oj_note}", unsafe_allow_html=True)
-        mc_bands = get_monte_carlo_bands(s, eff, str(ind.index.max()), MC_N_PATHS) if not ind.empty else None
-        st.plotly_chart(chart_projection(sim_latest, price, signal_choice, s, ind=ind, mc_bands=mc_bands),
-                        width='stretch', key=f'allproj_chart_{s}')
-        st.markdown(
-            projection_table_html(sim_latest, s, active_label=label),
-            unsafe_allow_html=True,
-        )
-
 # ── All Signals tab ──────────────────────────────────────────────────────────
 
-with tabs[3]:
+with tabs[2]:
     st.markdown(section_header('All Signals — CTA Signals per Instrument',
                                'Each instrument\'s own ST/MT/LT/All/WAll composites, stacked'),
                unsafe_allow_html=True)
@@ -1075,10 +1047,16 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
         mc_bands = (get_monte_carlo_bands(short, eff, str(ind.index.max()), MC_N_PATHS)
                    if not ind.empty else pd.DataFrame())
 
-        sub_charts, sub_weekly, sub_proj, sub_full = st.tabs(
-            ['Charts', 'Weekly Change', 'Projection', 'Full History + Projection'])
+        # Just 2 sub-tabs now (was 4: Charts/Weekly Change/Projection/Full
+        # History + Projection) — Weekly Change dropped in this restructure
+        # (its chart_weekly_change()/chart_weekly_change_total() functions are
+        # kept in code, unused, in case it comes back later).
+        sub_full, sub_signals = st.tabs(['Full History + Projection', 'Signals & Composites'])
 
-        with sub_charts:
+        col_map = {'ST_Avg': ST_COLS, 'MT_Avg': MT_COLS, 'LT_Avg': LT_COLS,
+                  'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
+
+        with sub_full:
             show_tues = False  # "Show Tuesday lines" checkbox hidden for now — add_tuesday_lines() kept in code to re-enable later
             # Same window applied to both price (GSCI) and fut (futures) so the
             # secondary-axis GSCI line doesn't fall out of sync with the
@@ -1089,10 +1067,38 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                                         active_label=active_label),
                             width='stretch', key=f'{short}_pricechart')
 
+            if sim.empty:
+                st.info('No simulation history for this instrument.')
+            else:
+                full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
+                                       horizontal=True, key=f'{short}_fullsignal')
+                ind_ranged_full = apply_sidebar_range(ind)
+                sim_sel_full = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
+                if mc_bands.empty:
+                    st.caption('Not enough history to run Monte Carlo for this instrument.')
+
+                # Left: full signal history (per the sidebar date range), up
+                # to the latest point. Right: the 10-day Monte Carlo
+                # projection fan continuing from that same point — split into
+                # two panels so a multi-year history doesn't crush the 10-day
+                # fan into an unreadable sliver.
+                st.plotly_chart(
+                    chart_projection_split(sim_sel_full, full_signal, short, ind_ranged_full, mc_bands=mc_bands),
+                    width='stretch', key=f'{short}_fullprojchart',
+                )
+
+                with st.expander('Single continuous view (history + fan on one axis)', expanded=False):
+                    st.plotly_chart(
+                        chart_projection(sim_sel_full, price, full_signal, short, ind=ind,
+                                         mc_bands=mc_bands, hist_df=ind_ranged_full),
+                        width='stretch', key=f'{short}_fullprojchart_single',
+                    )
+
+                st.markdown(projection_table_html(sim_sel_full, short, active_label=active_label), unsafe_allow_html=True)
+
+        with sub_signals:
             composite = st.radio('Composite', ['WAll_Avg', 'All_Avg', 'ST_Avg', 'MT_Avg', 'LT_Avg'],
                                  horizontal=True, key=f'{short}_composite')
-            col_map = {'ST_Avg': ST_COLS, 'MT_Avg': MT_COLS, 'LT_Avg': LT_COLS,
-                      'All_Avg': ST_COLS + MT_COLS + LT_COLS, 'WAll_Avg': ST_COLS + MT_COLS + LT_COLS}
             # Bucketed/aggregated slicer instead of a single "show all 144 raw
             # signals at once" checkbox — 'By Family' averages each indicator
             # family (Mom/MA/EMA/HMA/3MA/BB/DC/LRS/TRIX/KAMA) into one line
@@ -1106,68 +1112,8 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             st.plotly_chart(chart_signals(ind_ranged, composite, col_map[composite], detail=detail_map[detail_choice]),
                             width='stretch', key=f'{short}_sigchart')
 
-        with sub_weekly:
-            view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
-
-            # Week = Tuesday-to-Tuesday (matches this desk's COT reporting
-            # cadence, not calendar Mon-Fri) — same convention as the
-            # original tool. Called out explicitly since it's easy to assume
-            # a normal Mon-Fri week otherwise.
-            _tues_only = ind[ind.index.dayofweek == 1]
-            _wtd_note = ''
-            if not ind.empty and not _tues_only.empty and ind.index[-1] > _tues_only.index[-1]:
-                _wtd_note = (f'  Latest bar is **week-to-date** (partial): '
-                            f'{_tues_only.index[-1].date()} → {ind.index[-1].date()}.')
-            st.caption(
-                "Week = **Tuesday-to-Tuesday** (this desk's COT reporting cadence), not calendar Mon-Fri."
-                + _wtd_note
-            )
-
-            ind_ranged_w = apply_sidebar_range(ind)
-            st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
-                            width='stretch', key=f'{short}_weeklychart')
-            st.plotly_chart(chart_weekly_change_total(ind_ranged_w, view),
-                            width='stretch', key=f'{short}_weeklytotalchart')
-
-        with sub_proj:
-            if sim.empty:
-                st.info('No simulation history for this instrument.')
-            else:
-                proj_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
-                                       horizontal=True, key=f'{short}_projsignal')
-                sim_sel = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
-                if mc_bands.empty:
-                    st.caption('Not enough history to run Monte Carlo for this instrument.')
-                st.plotly_chart(chart_projection(sim_sel, price, proj_signal, short, ind=ind, mc_bands=mc_bands),
-                                width='stretch', key=f'{short}_projchart')
-                st.markdown(projection_table_html(sim_sel, short, active_label=active_label), unsafe_allow_html=True)
-
-        with sub_full:
-            # Combined long-history + projection-tail view: the actual
-            # historical signal across the sidebar's globally-selected date
-            # range, with the same Monte Carlo projection fan attached at the
-            # end — split into two panels (chart_projection_split()) so a
-            # multi-year history doesn't crush the 10-day fan into an
-            # unreadable sliver: left panel is the full compressed history,
-            # right panel is a FIXED-width recent+forecast window that stays
-            # the same size no matter how far back the date range goes.
-            if sim.empty:
-                st.info('No simulation history for this instrument.')
-            else:
-                st.caption('Left: full signal history (per the sidebar date range), up to the latest point. Right: the 10-day Monte Carlo projection fan continuing from that same point.')
-                full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
-                                       horizontal=True, key=f'{short}_fullsignal')
-                ind_ranged_full = apply_sidebar_range(ind)
-                sim_sel_full = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
-                st.plotly_chart(
-                    chart_projection_split(sim_sel_full, full_signal, short, ind_ranged_full, mc_bands=mc_bands),
-                    width='stretch', key=f'{short}_fullprojchart',
-                )
-
-                st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-                st.caption('Same history + fan, in one continuous view instead of split panels.')
-                st.plotly_chart(
-                    chart_projection(sim_sel_full, price, full_signal, short, ind=ind,
-                                     mc_bands=mc_bands, hist_df=ind_ranged_full),
-                    width='stretch', key=f'{short}_fullprojchart_single',
-                )
+            st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+            st.caption('Each composite on its own, for comparison.')
+            for comp in ['ST_Avg', 'MT_Avg', 'LT_Avg', 'All_Avg', 'WAll_Avg']:
+                st.plotly_chart(chart_signals(ind_ranged, comp, [], detail='none'),
+                                width='stretch', key=f'{short}_sigchart_{comp}')
