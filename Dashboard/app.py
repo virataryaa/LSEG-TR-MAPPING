@@ -743,14 +743,6 @@ source_choice = st.sidebar.radio(
          '(no OJ), history from ~2010. Same indicator math, different underlying price series, '
          'so signal values differ from GSCI.'),
 )
-if source_choice == 'Rollex':
-    st.sidebar.caption('Rollex has no OJ coverage — the OJ tab falls back to GSCI.')
-else:
-    st.sidebar.caption('GSCI has no LCC/LSU/RC coverage — those tabs fall forward to Rollex.')
-
-last_update = ind_all.loc[ind_all['Source'] == 'GSCI', 'Date'].max()
-st.sidebar.caption(f"Data as of {pd.Timestamp(last_update).date().isoformat()}")
-
 st.sidebar.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
 selected_instrument = st.sidebar.radio('Instrument', SHORTS, key='instrument_picker')
 
