@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -580,6 +581,17 @@ def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: 
     return result
 
 
+def _safe_round(v, scale: float = 100) -> float:
+    """round() raises ValueError on NaN — a legitimate possibility here (a
+    scenario/MC column can be NaN for an edge-case row). None renders as a
+    gap in the Plotly line instead of crashing the whole chart."""
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if np.isnan(fv) else round(fv * scale)
+
+
 def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_col: str, short: str,
                      ind: pd.DataFrame = None, mc_bands: pd.DataFrame = None, hist_df: pd.DataFrame = None):
     """Historical trailing signal feeding into a 3-scenario 10-day fan, with
@@ -588,19 +600,11 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
     a separate price panel). By default shows the last 7 actual days of
     history (ind.tail(7)); pass hist_df (e.g. the sidebar's full date-range
     selection) to show a longer trailing history feeding into the same
-    projection fan instead — used by the 'Full History + Projection' sub-tab."""
+    projection fan instead. See chart_projection_split() for the 'Full
+    History + Projection' sub-tab's split-panel version of this (long history
+    got too cluttered squeezed next to a 10-day fan in one continuous axis)."""
     if sim_sel.empty:
         return go.Figure()
-
-    def _safe_round(v, scale: float = 100) -> float:
-        """round() raises ValueError on NaN — a legitimate possibility here
-        (a scenario column can be NaN for an edge-case sim row). None renders
-        as a gap in the Plotly line instead of crashing the whole chart."""
-        try:
-            fv = float(v)
-        except (TypeError, ValueError):
-            return None
-        return None if np.isnan(fv) else round(fv * scale)
 
     color = MKT_COLOR.get(short, '#1f77b4')
     sig_col = f'{signal_col}_Avg'
@@ -676,6 +680,98 @@ def chart_projection(sim_sel: pd.DataFrame, price_actual: pd.DataFrame, signal_c
         yaxis=dict(range=[-105, 105], dtick=20, tickformat='.0f'),
         xaxis=dict(rangebreaks=[dict(bounds=['sat', 'mon'])]),
     )
+    return fig
+
+
+def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, ind_full: pd.DataFrame,
+                           mc_bands: pd.DataFrame = None, recent_days: int = 15):
+    """Split-panel version of chart_projection() for the 'Full History +
+    Projection' sub-tab: the full chosen date-range history on the left
+    (compressed — however many years) and a FIXED-width recent-history +
+    10-day-fan panel on the right (always recent_days wide, regardless of how
+    long the left panel's span is), sharing one y-axis. Squeezing a multi-year
+    history and a 10-day fan onto one continuous time axis crushed the fan
+    into an unreadable sliver — this keeps the fan a fixed, legible size no
+    matter the history length instead."""
+    if sim_sel.empty or ind_full is None or ind_full.empty:
+        return go.Figure()
+    sig_col = f'{signal_col}_Avg'
+    if sig_col not in ind_full.columns:
+        return go.Figure()
+
+    color = MKT_COLOR.get(short, '#1f77b4')
+    hist_full = ind_full[[sig_col]]
+    hist_recent = hist_full.tail(recent_days)
+    anchor_date = hist_recent.index[-1]
+    last_sig_val = _safe_round(hist_recent[sig_col].iloc[-1], scale=100)
+    if last_sig_val is None:
+        last_sig_val = 0
+
+    fig = make_subplots(
+        rows=1, cols=2, shared_yaxes=True, column_widths=[0.72, 0.28], horizontal_spacing=0.02,
+        subplot_titles=('History (chosen date range)', f'Last {recent_days}d + 10d Projection'),
+    )
+
+    # ── Left panel: full compressed history ────────────────────────────────
+    fig.add_trace(go.Scatter(x=hist_full.index, y=hist_full[sig_col] * 100, name='Actual',
+                             line=dict(color=color, width=1.4), showlegend=True), row=1, col=1)
+    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=1)
+
+    # ── Right panel: recent history + MC bands + UP/DOWN/UNCH fan (fixed width) ─
+    if mc_bands is not None and not mc_bands.empty and signal_col in ('ST', 'MT', 'LT', 'All', 'WAll'):
+        mc = mc_bands
+        x_mc = [anchor_date] + list(mc['Horizon_Date'])
+        p10, p25, p50, p75, p90 = (
+            [last_sig_val] + (mc[f'{signal_col}_{p}'] * 100).tolist()
+            for p in ('p10', 'p25', 'p50', 'p75', 'p90')
+        )
+        fig.add_trace(go.Scatter(x=x_mc, y=p90, mode='lines', line=dict(width=0),
+                                 showlegend=False, hoverinfo='skip'), row=1, col=2)
+        fig.add_trace(go.Scatter(x=x_mc, y=p10, mode='lines', fill='tonexty', fillcolor='rgba(140,140,140,0.14)',
+                                 line=dict(width=0), name='MC 10–90%', hoverinfo='skip'), row=1, col=2)
+        fig.add_trace(go.Scatter(x=x_mc, y=p75, mode='lines', line=dict(width=0),
+                                 showlegend=False, hoverinfo='skip'), row=1, col=2)
+        fig.add_trace(go.Scatter(x=x_mc, y=p25, mode='lines', fill='tonexty', fillcolor='rgba(100,100,100,0.26)',
+                                 line=dict(width=0), name='MC 25–75%', hoverinfo='skip'), row=1, col=2)
+        fig.add_trace(go.Scatter(x=x_mc, y=p50, name='MC median', mode='lines',
+                                 line=dict(color='#757575', width=1.3, dash='dot'), hoverinfo='skip'), row=1, col=2)
+
+    fig.add_trace(go.Scatter(x=hist_recent.index, y=hist_recent[sig_col] * 100, name='Actual',
+                             line=dict(color=color, width=2), showlegend=False), row=1, col=2)
+
+    scen_style = {
+        'up':   ('↑ UP',   '#1b8a3d', 'dash',    'top center'),
+        'down': ('↓ DOWN', '#c62828', 'dot',     'bottom center'),
+        'unch': ('UNCH',   '#9E9E9E', 'dashdot', 'middle right'),
+    }
+    for scen, (name, clr, dash, tpos) in scen_style.items():
+        col = f'{signal_col}_{scen}'
+        if col not in sim_sel.columns:
+            continue
+        pcol = f'price_{scen}'
+        prices = sim_sel[pcol].tolist() if pcol in sim_sel.columns else []
+        y_vals = [last_sig_val] + [_safe_round(v, scale=100) for v in sim_sel[col]]
+        x_vals = [anchor_date] + list(sim_sel['Horizon_Date'])
+        p_labels = [''] + [('' if p is None or (isinstance(p, float) and np.isnan(p)) else f'{p:,.1f}') for p in prices]
+        fig.add_trace(go.Scatter(
+            x=x_vals, y=y_vals, name=name, mode='lines+markers+text',
+            line=dict(color=clr, width=1.8, dash=dash), marker=dict(size=6, color=clr),
+            text=p_labels, textposition=tpos, textfont=dict(size=9, color=clr),
+        ), row=1, col=2)
+
+    fig.add_hline(y=0, line_width=1, line_color='rgba(200,200,200,0.4)', row=1, col=2)
+    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=1)
+    fig.update_xaxes(rangebreaks=[dict(bounds=['sat', 'mon'])], row=1, col=2)
+    fig.update_yaxes(range=[-105, 105], dtick=20, tickformat='.0f', row=1, col=1)
+    fig.update_yaxes(showticklabels=False, row=1, col=2)
+    fig.update_layout(
+        template=PLOTLY_TEMPLATE, height=460, margin=dict(l=10, r=10, t=90, b=10),
+        title=dict(text=f'{signal_col} — Full History + Projection', x=0, xanchor='left', y=0.99, yanchor='top'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
+                   font=dict(size=10), tracegroupgap=4),
+    )
+    for ann in fig.layout.annotations:  # subplot_titles come back as small grey captions
+        ann.font = dict(size=10, color='#999')
     return fig
 
 
@@ -1031,19 +1127,21 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
         with sub_full:
             # Combined long-history + projection-tail view: the actual
             # historical signal across the sidebar's globally-selected date
-            # range, with the same 10-day Monte Carlo fan attached at the end
-            # — distinct from the Projection sub-tab above, which only shows a
-            # short 7-day trailing history before the fan.
+            # range, with the same Monte Carlo projection fan attached at the
+            # end — split into two panels (chart_projection_split()) so a
+            # multi-year history doesn't crush the 10-day fan into an
+            # unreadable sliver: left panel is the full compressed history,
+            # right panel is a FIXED-width recent+forecast window that stays
+            # the same size no matter how far back the date range goes.
             if sim.empty:
                 st.info('No simulation history for this instrument.')
             else:
-                st.caption('Full signal history (per the sidebar date range) with the Monte Carlo projection fan attached at the end.')
+                st.caption('Left: full signal history (per the sidebar date range). Right: fixed-width recent history + Monte Carlo projection fan — stays readable regardless of how far left goes.')
                 full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
                                        horizontal=True, key=f'{short}_fullsignal')
                 ind_ranged_full = apply_sidebar_range(ind)
                 sim_sel_full = sim[sim['Run_Date'] == run_choice].sort_values('Horizon_Day')
                 st.plotly_chart(
-                    chart_projection(sim_sel_full, price, full_signal, short, ind=ind,
-                                     mc_bands=mc_bands, hist_df=ind_ranged_full),
+                    chart_projection_split(sim_sel_full, full_signal, short, ind_ranged_full, mc_bands=mc_bands),
                     width='stretch', key=f'{short}_fullprojchart',
                 )
