@@ -913,6 +913,21 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
 
         with sub_weekly:
             view = st.radio('View', ['WAll', 'All'], horizontal=True, key=f'{short}_weekview')
+
+            # Week = Tuesday-to-Tuesday (matches this desk's COT reporting
+            # cadence, not calendar Mon-Fri) — same convention as the
+            # original tool. Called out explicitly since it's easy to assume
+            # a normal Mon-Fri week otherwise.
+            _tues_only = ind[ind.index.dayofweek == 1]
+            _wtd_note = ''
+            if not ind.empty and not _tues_only.empty and ind.index[-1] > _tues_only.index[-1]:
+                _wtd_note = (f'  Latest bar is **week-to-date** (partial): '
+                            f'{_tues_only.index[-1].date()} → {ind.index[-1].date()}.')
+            st.caption(
+                "Week = **Tuesday-to-Tuesday** (this desk's COT reporting cadence), not calendar Mon-Fri."
+                + _wtd_note
+            )
+
             ind_ranged_w = apply_sidebar_range(ind)
             st.plotly_chart(chart_weekly_change(ind_ranged_w, view),
                             width='stretch', key=f'{short}_weeklychart')
