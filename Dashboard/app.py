@@ -17,15 +17,15 @@ import streamlit as st
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / 'Database'
 
-# Reuse Code/'s indicator engine for the live Monte Carlo feature (safe now —
-# calculate_indicators()/calculate_indicators_multi() no longer touch
-# pandas_ta at all; the 5 pieces it used to delegate to (BBands/HMA/LRS/TRIX/
-# KAMA) are hand-rolled from pandas_ta's own formulas, validated to match
-# exactly). This used to be a guarded/optional import because pandas_ta pulled
-# in numba, which has no wheel for some Python versions Streamlit Cloud may
-# run — that dependency is gone now, so this is a plain top-level import.
+# Only need MC_N_PATHS from Code/ now (for display text) — Monte Carlo bands
+# themselves are precomputed by Code/tr_mapping_fetch.py's main() (each daily
+# ingest run) and stored to Database/mc_bands.parquet; the dashboard just
+# reads that file (get_monte_carlo_bands() below), rather than importing and
+# running compute_monte_carlo_bands() live. Live-per-instrument-switch
+# computation (~2-4s each, N=200 paths) was the actual cause of the dashboard
+# feeling slow to load/click through — this removes that entirely.
 sys.path.insert(0, str(BASE_DIR / 'Code'))
-from tr_mapping_fetch import compute_monte_carlo_bands, MC_N_PATHS
+from tr_mapping_fetch import MC_N_PATHS
 
 st.set_page_config(page_title='CTA Trend Signals', layout='wide')
 
@@ -76,7 +76,7 @@ PLOTLY_TEMPLATE = 'plotly_white'
 # ── Data loading (cached) ────────────────────────────────────────────────────────
 
 _DATA_FILES = ['price_history.parquet', 'futures_price.parquet', 'indicators.parquet',
-              'sim_history.parquet', 'active_labels.parquet']
+              'sim_history.parquet', 'active_labels.parquet', 'mc_bands.parquet']
 
 
 def _data_signature() -> tuple:
@@ -112,16 +112,26 @@ def load_all(_signature: tuple):
     else:
         label_df = pd.DataFrame(columns=['Commodity', 'Date', 'Active_Label'])
 
+    # Precomputed by Code/tr_mapping_fetch.py's main() each ingest run — the
+    # dashboard only ever reads this, never recomputes it (see the comment
+    # by the MC_N_PATHS import above).
+    mcbands_path = DATA_DIR / 'mc_bands.parquet'
+    if mcbands_path.exists():
+        mcbands_df = pd.read_parquet(mcbands_path)
+        mcbands_df['Horizon_Date'] = pd.to_datetime(mcbands_df['Horizon_Date'])
+    else:
+        mcbands_df = pd.DataFrame(columns=['Commodity', 'Source', 'Horizon_Date', 'Horizon_Day'])
+
     # Defensive backward-compat: older cached/on-disk data without the Source
     # column (pre-Rollex) is treated as GSCI rather than crashing downstream.
     for df in (price_df, ind_df, sim_df):
         if 'Source' not in df.columns:
             df.insert(1, 'Source', 'GSCI')
 
-    return price_df, fut_df, ind_df, sim_df, label_df
+    return price_df, fut_df, ind_df, sim_df, label_df, mcbands_df
 
 
-price_all, fut_all, ind_all, sim_all, label_all = load_all(_data_signature())
+price_all, fut_all, ind_all, sim_all, label_all, mcbands_all = load_all(_data_signature())
 
 if ind_all.empty:
     st.error('No indicator data found in Database/indicators.parquet. Run Code/tr_mapping_fetch.py first.')
@@ -535,50 +545,24 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
     return fig
 
 
-# ── Monte Carlo signal bands (on-demand, dashboard-side, live) ─────────────────
+# ── Monte Carlo signal bands (precomputed — see Code/tr_mapping_fetch.py) ──────
 #
 # The 3-scenario UP/DOWN/UNCH fan (build_simulation() in Code/) is deterministic
 # — the same vol% move compounded every day for 10 days, an extreme stress path
 # rather than a likely-range estimate. This gives a real probabilistic range
 # instead: N random paths, each with the full indicator set recomputed, reduced
-# to percentile bands — using compute_monte_carlo_bands() from Code/, which
-# vectorizes all N paths together (calculate_indicators_multi()) rather than
-# looping calculate_indicators() N times: N=100 in ~2s, N=500 in ~11s. Cached
-# per (instrument, source, day, N) so repeat views are instant.
+# to percentile bands. Used to be computed live here on first view per
+# instrument/session (~2-4s each) — that per-instrument-switch delay was the
+# actual cause of the dashboard feeling slow. Now precomputed once per
+# instrument/source in Code/tr_mapping_fetch.py's main() (each daily ingest
+# run, MC_N_PATHS=100 paths) and stored to Database/mc_bands.parquet —
+# get_monte_carlo_bands() below is just an instant read of that.
 
-def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: int, seed: int = 42) -> pd.DataFrame:
-    """Session-scoped cache (st.session_state, not @st.cache_data) so a live
-    progress bar can run on the real computation — st.cache_data's key can't
-    include a UI progress callback. First view per (instrument, source, day,
-    N) in this browser session pays the cost with a progress bar; repeat
-    views in the same session return instantly. `last_date_str` is part of
-    the cache key purely so it invalidates once new data lands."""
-    cache_key = (short, source, last_date_str, n_paths, seed)
-    cache = st.session_state.setdefault('_mc_cache', {})
-    if cache_key in cache:
-        return cache[cache_key]
-
-    price, _, _, _, _ = get_instrument_data(short, source)
-    if price.empty:
-        cache[cache_key] = pd.DataFrame()
-        return cache[cache_key]
-
-    # st.progress()'s `text=` kwarg needs a fairly recent Streamlit version —
-    # a separate st.caption() for the label works on every version instead of
-    # risking a TypeError if the deployed environment is older than expected.
-    progress_label = st.empty()
-    progress_label.caption(f'Monte Carlo ({n_paths} paths) — starting…')
-    progress = st.progress(0)
-
-    def _cb(frac: float, stage: str):
-        progress_label.caption(f'Monte Carlo ({n_paths} paths) — {stage} ({int(frac * 100)}%)')
-        progress.progress(frac)
-
-    result = compute_monte_carlo_bands(price, n_paths=n_paths, seed=seed, progress_cb=_cb)
-    progress.empty()
-    progress_label.empty()
-    cache[cache_key] = result
-    return result
+def get_monte_carlo_bands(short: str, source: str) -> pd.DataFrame:
+    sub = mcbands_all[(mcbands_all['Commodity'] == short) & (mcbands_all['Source'] == source)]
+    if sub.empty:
+        return pd.DataFrame()
+    return sub.drop(columns=['Commodity', 'Source']).sort_values('Horizon_Day').reset_index(drop=True)
 
 
 def _safe_round(v, scale: float = 100) -> float:
@@ -919,10 +903,11 @@ def overview_row(short: str) -> dict:
 #
 # No Run Date picker and no Monte Carlo path-count control any more — the app
 # always runs/displays the latest available date+run only (saves computing
-# every historical run date on every page load), and MC paths are fixed at
-# MC_N_PATHS (200), not user-selectable. No Signal Source toggle either — the
-# dashboard is Rollex-only now except OJ (no Rollex coverage), which always
-# uses GSCI automatically (instrument_source()) rather than a user choice.
+# every historical run date on every page load), and MC bands are precomputed
+# daily at MC_N_PATHS (100), not user-selectable or live-computed. No Signal
+# Source toggle either — the dashboard is Rollex-only now except OJ (no
+# Rollex coverage), which always uses GSCI automatically (instrument_source())
+# rather than a user choice.
 
 st.sidebar.markdown(
     """<div style="padding:4px 0 12px 0;">
@@ -1039,13 +1024,12 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
 
         # Run date is always the latest available — no picker any more (saves
         # computing every historical run date on every page load). Monte Carlo
-        # bands are preloaded/shown by default for the Projection views below —
-        # no opt-in checkbox — fixed at MC_N_PATHS (200) paths, 20-day returns
-        # lookback (see Code/tr_mapping_fetch.py's compute_monte_carlo_bands()).
+        # bands are precomputed daily (MC_N_PATHS=100, 20-day returns lookback
+        # — see Code/tr_mapping_fetch.py's main()/compute_monte_carlo_bands())
+        # and just read here — instant, no per-switch compute delay.
         run_dates = sorted(sim['Run_Date'].unique(), reverse=True) if not sim.empty else []
         run_choice = run_dates[0] if run_dates else None
-        mc_bands = (get_monte_carlo_bands(short, eff, str(ind.index.max()), MC_N_PATHS)
-                   if not ind.empty else pd.DataFrame())
+        mc_bands = get_monte_carlo_bands(short, eff)
 
         sub_full, sub_signals, sub_weekly = st.tabs(
             ['Full History + Projection', 'Signals & Composites', 'Weekly Change'])

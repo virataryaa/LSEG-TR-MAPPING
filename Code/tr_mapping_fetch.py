@@ -16,6 +16,9 @@ original "TR mapping old" version this was converted from):
                                       Actual_Close
     Database/active_labels.parquet   Commodity, Date, Active_Label   (Rollex's active-contract
                                       label, e.g. "Dec'26" — Rollex-sourced instruments only)
+    Database/mc_bands.parquet        Commodity, Source, Horizon_Date, Horizon_Day, <25 pctl cols>
+                                      (Monte Carlo signal bands, precomputed here each run so the
+                                      dashboard only ever reads them — see compute_monte_carlo_bands())
 
 No pandas_ta anywhere in this file — it pulls in numba unconditionally, and
 numba has no published wheel for some Python versions Streamlit Cloud may run
@@ -69,7 +72,8 @@ FUTPX_FILE    = DATA_DIR / 'futures_price.parquet'
 IND_FILE      = DATA_DIR / 'indicators.parquet'
 SIM_FILE      = DATA_DIR / 'sim_history.parquet'
 LABEL_FILE    = DATA_DIR / 'active_labels.parquet'  # Rollex active-contract label (e.g. "Dec'26"), Commodity/Date/Active_Label
-MC_N_PATHS    = 200  # fixed — vectorized across all N paths at once (calculate_indicators_multi) -> ~4s/instrument/source
+MCBANDS_FILE  = DATA_DIR / 'mc_bands.parquet'  # precomputed Monte Carlo percentile bands, Commodity/Source/Horizon_Date/Horizon_Day/<25 pctl cols>
+MC_N_PATHS    = 100  # fixed — vectorized across all N paths at once (calculate_indicators_multi) -> ~2s/instrument/source
 
 # Rollex is a sibling LSEG-* project (own repo, own automator) — CTA only ever
 # READS its parquet output, never writes to it. BASE_DIR is CTA's own root, so
@@ -260,6 +264,27 @@ def upsert_active_labels(inst: Instrument, df: pd.DataFrame) -> None:
     combined = combined.drop_duplicates(subset=['Commodity', 'Date'], keep='last')
     combined = combined.sort_values(['Commodity', 'Date']).reset_index(drop=True)
     combined.to_parquet(LABEL_FILE, index=False)
+
+
+def upsert_mc_bands(inst: Instrument, bands_df: pd.DataFrame, source: str = 'GSCI') -> None:
+    """Full replace of this instrument+source's Monte Carlo bands — precomputed
+    once per ingest run (main()) instead of live in the dashboard, so switching
+    instruments in the UI is an instant parquet read instead of a ~2-4s
+    recompute. bands_df: output of compute_monte_carlo_bands() (Horizon_Date,
+    Horizon_Day, <25 percentile columns>)."""
+    if bands_df.empty:
+        return
+    rows = bands_df.copy()
+    rows.insert(0, 'Source', source)
+    rows.insert(0, 'Commodity', inst.short)
+    old = _load(MCBANDS_FILE)
+    if old.empty:
+        combined = rows
+    else:
+        old = old[~((old['Commodity'] == inst.short) & (old['Source'] == source))]
+        combined = pd.concat([old, rows], ignore_index=True)
+    combined = combined.sort_values(['Commodity', 'Source', 'Horizon_Day']).reset_index(drop=True)
+    combined.to_parquet(MCBANDS_FILE, index=False)
 
 
 def upsert_indicators(inst: Instrument, df: pd.DataFrame, source: str = 'GSCI') -> None:
@@ -1049,9 +1074,12 @@ def reset_sim_history() -> None:
 # day percentile bands, using calculate_indicators_multi() (all N paths at
 # once — see that function's docstring) rather than looping calculate_
 # indicators() N times: N=100 in ~2s, N=500 in ~11s, vs. the original
-# per-path-loop's ~2.3s PER PATH (N=50 alone took ~47s). Fast enough to run
-# live in the dashboard on demand — no longer needs to be an ingest-only,
-# once-a-day batch step.
+# per-path-loop's ~2.3s PER PATH (N=50 alone took ~47s). Computed HERE in
+# main() (once per instrument/source per ingest run, MC_N_PATHS=100) and
+# stored to Database/mc_bands.parquet via upsert_mc_bands() — the dashboard
+# only ever reads that file (instant), rather than recomputing live per
+# instrument switch (that was the actual cause of the dashboard feeling slow
+# on every click — each switch paid the ~2-4s compute cost fresh).
 #
 # Returns pool: last 20 trading days only (not the long-run ~2yr/500-day
 # window this used before) — deliberately captures the CURRENT/latest
@@ -1138,6 +1166,13 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
                     append_sim_history(inst, sim, source='GSCI')
                 except Exception as e:
                     print(f'  [{inst.short}/GSCI] today\'s simulation error: {e}')
+
+                try:
+                    mc_bands = compute_monte_carlo_bands(price_df, n_paths=MC_N_PATHS)
+                    upsert_mc_bands(inst, mc_bands, source='GSCI')
+                    print(f'  [{inst.short}/GSCI] Monte Carlo bands saved ({MC_N_PATHS} paths)')
+                except Exception as e:
+                    print(f'  [{inst.short}/GSCI] Monte Carlo error: {e}')
             else:
                 print(f'  [{inst.short}] no GSCI sub-index — Rollex-only instrument')
 
@@ -1165,6 +1200,13 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
                         append_sim_history(inst, rollex_sim, source='Rollex')
                     except Exception as e:
                         print(f'  [{inst.short}/Rollex] today\'s simulation error: {e}')
+
+                    try:
+                        rollex_mc_bands = compute_monte_carlo_bands(rollex_df, n_paths=MC_N_PATHS)
+                        upsert_mc_bands(inst, rollex_mc_bands, source='Rollex')
+                        print(f'  [{inst.short}/Rollex] Monte Carlo bands saved ({MC_N_PATHS} paths)')
+                    except Exception as e:
+                        print(f'  [{inst.short}/Rollex] Monte Carlo error: {e}')
 
     finally:
         if LSEG_AVAILABLE:
