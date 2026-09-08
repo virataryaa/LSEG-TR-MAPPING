@@ -519,13 +519,20 @@ def get_monte_carlo_bands(short: str, source: str, last_date_str: str, n_paths: 
         cache[cache_key] = pd.DataFrame()
         return cache[cache_key]
 
-    progress = st.progress(0, text=f'Monte Carlo ({n_paths} paths) — starting…')
+    # st.progress()'s `text=` kwarg needs a fairly recent Streamlit version —
+    # a separate st.caption() for the label works on every version instead of
+    # risking a TypeError if the deployed environment is older than expected.
+    progress_label = st.empty()
+    progress_label.caption(f'Monte Carlo ({n_paths} paths) — starting…')
+    progress = st.progress(0)
 
     def _cb(frac: float, stage: str):
-        progress.progress(frac, text=f'Monte Carlo ({n_paths} paths) — {stage} ({int(frac * 100)}%)')
+        progress_label.caption(f'Monte Carlo ({n_paths} paths) — {stage} ({int(frac * 100)}%)')
+        progress.progress(frac)
 
     result = compute_monte_carlo_bands(price, n_paths=n_paths, seed=seed, progress_cb=_cb)
     progress.empty()
+    progress_label.empty()
     cache[cache_key] = result
     return result
 
