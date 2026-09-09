@@ -538,9 +538,11 @@ def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_se
 
     fig.update_yaxes(showticklabels=False, row=1, col=2)
     fig.update_layout(
-        template=PLOTLY_TEMPLATE, height=300, margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation='h', y=1.12, font=dict(size=10)),
-        title=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source}{label_suffix})',
+        template=PLOTLY_TEMPLATE, height=320, margin=dict(l=10, r=10, t=90, b=10),
+        title=dict(text=f'{INSTRUMENT_LABELS.get(short, short)} — Price ({source}{label_suffix})',
+                   x=0, xanchor='left', y=0.99, yanchor='top'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
+                   font=dict(size=10), tracegroupgap=4),
     )
     for ann in fig.layout.annotations:  # subplot_titles come back as small grey captions
         ann.font = dict(size=10, color='#999')
