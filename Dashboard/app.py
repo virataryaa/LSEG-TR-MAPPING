@@ -500,7 +500,6 @@ def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_se
 
     fig = make_subplots(
         rows=1, cols=2, shared_yaxes=True, column_widths=[0.72, 0.28], horizontal_spacing=0.02,
-        subplot_titles=('History (chosen date range)', 'Projection (10d)'),
     )
     fig.add_trace(go.Scatter(x=primary.index, y=primary['CLOSE'], name=primary_name,
                              line=dict(color=color, width=1.6), showlegend=True,
@@ -544,8 +543,6 @@ def chart_price_split(short: str, price: pd.DataFrame, fut: pd.DataFrame, sim_se
         legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
                    font=dict(size=10), tracegroupgap=4),
     )
-    for ann in fig.layout.annotations:  # subplot_titles come back as small grey captions
-        ann.font = dict(size=10, color='#999')
     return fig
 
 
@@ -771,7 +768,6 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
 
     fig = make_subplots(
         rows=1, cols=2, shared_yaxes=True, column_widths=[0.72, 0.28], horizontal_spacing=0.02,
-        subplot_titles=('History (chosen date range)', 'Projection (10d)'),
     )
 
     # ── Left panel: full compressed history, ending at the latest point ────
@@ -854,8 +850,6 @@ def chart_projection_split(sim_sel: pd.DataFrame, signal_col: str, short: str, i
         legend=dict(orientation='h', yanchor='bottom', y=1.0, xanchor='left', x=0,
                    font=dict(size=10), tracegroupgap=4),
     )
-    for ann in fig.layout.annotations:  # subplot_titles come back as small grey captions
-        ann.font = dict(size=10, color='#999')
     return fig
 
 
