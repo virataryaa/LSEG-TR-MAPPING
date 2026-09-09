@@ -1027,12 +1027,16 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 _latest_by_inst = ind_all.groupby(['Commodity', 'Source'])['Date'].max()
+_latest_px_by_inst = price_all.sort_values('Date').groupby(['Commodity', 'Source'])['Close'].last()
 _latest_rows = []
 for _s in SHORTS:
     _parts = []
     for _src in ('GSCI', 'Rollex'):
         if (_s, _src) in _latest_by_inst.index:
-            _parts.append(f'{_src} {pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()}')
+            _date_str = pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()
+            _px = _latest_px_by_inst.get((_s, _src))
+            _px_str = f' · {fmt_price(_s, _px)}' if _px is not None and not pd.isna(_px) else ''
+            _parts.append(f'{_src} {_date_str}{_px_str}')
     _latest_rows.append(
         f'<div style="display:flex;justify-content:space-between;gap:8px;font-size:0.68rem;'
         f'color:#555;padding:1px 0;"><b style="color:#111;">{_s}</b>'

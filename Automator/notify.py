@@ -24,15 +24,24 @@ def indicator_summary() -> str:
     """One line per (instrument, source) — GSCI and Rollex last-date/signal
     shown separately, same as the dashboard sidebar's 'Latest Data by
     Instrument'. Not every instrument has both (OJ is GSCI-only, LCC/LSU/RC
-    are Rollex-only)."""
+    are Rollex-only). Settle price joined in from price_history.parquet —
+    indicators.parquet itself has no CLOSE column (dropped on write, since
+    it's already stored there)."""
     lines = []
-    path = DB_DIR / "indicators.parquet"
-    if not path.exists():
+    ind_path = DB_DIR / "indicators.parquet"
+    px_path  = DB_DIR / "price_history.parquet"
+    if not ind_path.exists():
         return "  indicators.parquet NOT FOUND"
-    df = pd.read_parquet(path)
+    df = pd.read_parquet(ind_path)
     df["Date"] = pd.to_datetime(df["Date"])
     if "Source" not in df.columns:
         df["Source"] = "GSCI"
+
+    px_df = pd.DataFrame(columns=["Commodity", "Source", "Date", "Close"])
+    if px_path.exists():
+        px_df = pd.read_parquet(px_path)
+        px_df["Date"] = pd.to_datetime(px_df["Date"])
+
     for short in SHORTS:
         sub = df[df["Commodity"] == short]
         if sub.empty:
@@ -45,8 +54,11 @@ def indicator_summary() -> str:
                 continue
             last = s.iloc[-1]
             label = f"{short:<4}" if first else "    "
+            px_sub = px_df[(px_df["Commodity"] == short) & (px_df["Source"] == src)
+                          & (px_df["Date"] == last["Date"])]
+            settle = f"{px_sub['Close'].iloc[0]:.2f}" if not px_sub.empty else "n/a"
             lines.append(
-                f"  {label}  {src:<6} last={last['Date'].date()}   "
+                f"  {label}  {src:<6} last={last['Date'].date()}  settle={settle:>9}   "
                 f"ST={last['ST_Avg']:+.3f}  MT={last['MT_Avg']:+.3f}  "
                 f"LT={last['LT_Avg']:+.3f}  WAll={last['WAll_Avg']:+.3f}"
             )
