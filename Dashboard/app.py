@@ -1028,6 +1028,8 @@ st.sidebar.markdown(
 )
 _latest_by_inst = ind_all.groupby(['Commodity', 'Source'])['Date'].max()
 _latest_px_by_inst = price_all.sort_values('Date').groupby(['Commodity', 'Source'])['Close'].last()
+_latest_label_by_inst = (label_all.sort_values('Date').groupby('Commodity')['Active_Label'].last()
+                         if not label_all.empty else pd.Series(dtype=object))
 _latest_rows = []
 for _s in SHORTS:
     _parts = []
@@ -1036,7 +1038,9 @@ for _s in SHORTS:
             _date_str = pd.Timestamp(_latest_by_inst[(_s, _src)]).date().isoformat()
             _px = _latest_px_by_inst.get((_s, _src))
             _px_str = f' · {fmt_price(_s, _px)}' if _px is not None and not pd.isna(_px) else ''
-            _parts.append(f'{_src} {_date_str}{_px_str}')
+            _lbl = _latest_label_by_inst.get(_s) if _src == 'Rollex' else None
+            _lbl_str = f' ({_lbl})' if _lbl is not None and not pd.isna(_lbl) else ''
+            _parts.append(f'{_src} {_date_str}{_px_str}{_lbl_str}')
     _latest_rows.append(
         f'<div style="display:flex;justify-content:space-between;gap:8px;font-size:0.68rem;'
         f'color:#555;padding:1px 0;"><b style="color:#111;">{_s}</b>'
