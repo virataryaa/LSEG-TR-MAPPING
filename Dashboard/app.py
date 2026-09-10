@@ -1155,11 +1155,7 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
                         'MC pool', MC_LOOKBACK_CHOICES, horizontal=True,
                         format_func=lambda v: f'{v}d',
                         key=f'{short}_mclookback',
-                        help='Days of past price moves the Monte Carlo cone samples from. '
-                             '20d tracks the latest vol regime but draws on only 20 '
-                             'observations, so the first few days come out lumpy and the '
-                             'band runs too narrow. 60d draws on 3x the observations and '
-                             'still carries shocks 20d has dropped.',
+                        help='Days of past price moves the cone samples from.',
                     )
                 mc_bands = get_monte_carlo_bands(short, eff, lookback=mc_lookback)
                 ind_ranged_full = apply_sidebar_range(ind)
