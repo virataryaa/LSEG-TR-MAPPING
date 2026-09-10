@@ -627,11 +627,32 @@ def chart_signals_all(ind: pd.DataFrame, short: str):
 # run, MC_N_PATHS=100 paths) and stored to Database/mc_bands.parquet —
 # get_monte_carlo_bands() below is just an instant read of that.
 
-def get_monte_carlo_bands(short: str, source: str) -> pd.DataFrame:
+MC_LOOKBACK_CHOICES = [20, 60]  # mirrors MC_LOOKBACKS in Code/tr_mapping_fetch.py
+
+
+def get_monte_carlo_bands(short: str, source: str, lookback: int = 20) -> pd.DataFrame:
+    """lookback: which return-pool window's precomputed bands to show (the
+    Projection tab's "MC pool" radio). Both are written by each ingest run.
+
+    20d tracks the current vol regime but is built from only 20 return
+    observations, so the first few horizon days are lumpy and the 10-90 band
+    historically covered ~71% of realised outcomes on KC rather than 80%; 60d
+    draws on 3x the observations for a smoother, wider cone. A parquet written
+    before the Lookback column existed has no such column — fall back to
+    showing it as the 20d series."""
     sub = mcbands_all[(mcbands_all['Commodity'] == short) & (mcbands_all['Source'] == source)]
     if sub.empty:
         return pd.DataFrame()
-    return sub.drop(columns=['Commodity', 'Source']).sort_values('Horizon_Day').reset_index(drop=True)
+    if 'Lookback' in sub.columns:
+        pick = sub[sub['Lookback'] == int(lookback)]
+        # Requested pool not in the parquet yet (e.g. 250d before the next
+        # ingest run) — fall back to whatever pool this instrument does have
+        # rather than silently dropping the band off the chart.
+        if pick.empty:
+            pick = sub[sub['Lookback'] == sub['Lookback'].min()]
+        sub = pick
+    drop = [c for c in ('Commodity', 'Source', 'Lookback') if c in sub.columns]
+    return sub.drop(columns=drop).sort_values('Horizon_Day').reset_index(drop=True)
 
 
 def _safe_round(v, scale: float = 100) -> float:
@@ -1118,8 +1139,29 @@ for short in [selected_instrument]:  # loops exactly once — keeps the body's i
             if sim.empty:
                 st.info('No simulation history for this instrument.')
             else:
-                full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
-                                       horizontal=True, key=f'{short}_fullsignal')
+                _c1, _c2 = st.columns([3, 2])
+                with _c1:
+                    full_signal = st.radio('Signal', ['WAll', 'All', 'ST', 'MT', 'LT'],
+                                           horizontal=True, key=f'{short}_fullsignal')
+                with _c2:
+                    # Return-pool window behind the MC cone. 20d = current vol
+                    # regime but only 20 return observations, so the near-term
+                    # cone is lumpy and historically ran narrow (~71% of KC
+                    # outcomes inside the 10-90 band vs the 80% it implies);
+                    # 60d has 3x the observations, so a smoother near cone, and
+                    # still carries shocks that have rolled out of the 20d
+                    # window — in practice the wider of the two.
+                    mc_lookback = st.radio(
+                        'MC pool', MC_LOOKBACK_CHOICES, horizontal=True,
+                        format_func=lambda v: f'{v}d',
+                        key=f'{short}_mclookback',
+                        help='Days of past price moves the Monte Carlo cone samples from. '
+                             '20d tracks the latest vol regime but draws on only 20 '
+                             'observations, so the first few days come out lumpy and the '
+                             'band runs too narrow. 60d draws on 3x the observations and '
+                             'still carries shocks 20d has dropped.',
+                    )
+                mc_bands = get_monte_carlo_bands(short, eff, lookback=mc_lookback)
                 ind_ranged_full = apply_sidebar_range(ind)
                 if mc_bands.empty:
                     st.caption('Not enough history to run Monte Carlo for this instrument.')

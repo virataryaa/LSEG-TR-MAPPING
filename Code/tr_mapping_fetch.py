@@ -266,24 +266,37 @@ def upsert_active_labels(inst: Instrument, df: pd.DataFrame) -> None:
     combined.to_parquet(LABEL_FILE, index=False)
 
 
-def upsert_mc_bands(inst: Instrument, bands_df: pd.DataFrame, source: str = 'GSCI') -> None:
-    """Full replace of this instrument+source's Monte Carlo bands — precomputed
-    once per ingest run (main()) instead of live in the dashboard, so switching
-    instruments in the UI is an instant parquet read instead of a ~2-4s
-    recompute. bands_df: output of compute_monte_carlo_bands() (Horizon_Date,
-    Horizon_Day, <25 percentile columns>)."""
+def upsert_mc_bands(inst: Instrument, bands_df: pd.DataFrame, source: str = 'GSCI',
+                    lookback: int = None) -> None:
+    """Full replace of this instrument+source+lookback's Monte Carlo bands —
+    precomputed once per ingest run (main()) instead of live in the dashboard,
+    so switching instruments in the UI is an instant parquet read instead of a
+    ~2-4s recompute. bands_df: output of compute_monte_carlo_bands()
+    (Horizon_Date, Horizon_Day, <25 percentile columns>).
+
+    lookback is the return-pool window the bands were built from — stored as a
+    column so BOTH variants (MC_LOOKBACKS) live in the parquet side by side and
+    the dashboard can switch between them with a radio, no recompute."""
     if bands_df.empty:
         return
+    if lookback is None:
+        lookback = MC_LOOKBACK_DAYS
     rows = bands_df.copy()
+    rows.insert(0, 'Lookback', int(lookback))
     rows.insert(0, 'Source', source)
     rows.insert(0, 'Commodity', inst.short)
     old = _load(MCBANDS_FILE)
     if old.empty:
         combined = rows
     else:
-        old = old[~((old['Commodity'] == inst.short) & (old['Source'] == source))]
+        # Pre-Lookback parquets have no such column — treat those legacy rows as
+        # the old 20-day default so this upsert still replaces them cleanly.
+        if 'Lookback' not in old.columns:
+            old['Lookback'] = MC_LOOKBACK_DAYS
+        old = old[~((old['Commodity'] == inst.short) & (old['Source'] == source)
+                    & (old['Lookback'] == int(lookback)))]
         combined = pd.concat([old, rows], ignore_index=True)
-    combined = combined.sort_values(['Commodity', 'Source', 'Horizon_Day']).reset_index(drop=True)
+    combined = combined.sort_values(['Commodity', 'Source', 'Lookback', 'Horizon_Day']).reset_index(drop=True)
     combined.to_parquet(MCBANDS_FILE, index=False)
 
 
@@ -1086,16 +1099,46 @@ def reset_sim_history() -> None:
 # volatility regime rather than averaging over a long history that may no
 # longer be representative.
 
-MC_LOOKBACK_DAYS = 20  # trading days of historical returns the bootstrap draws from
+MC_LOOKBACK_DAYS = 20  # default/legacy return-pool window (dashboard radio: "20d")
+
+# Both pool windows are computed and stored each run so the dashboard can
+# switch between them instantly (radio) rather than recomputing live.
+#
+#   20d  — captures the CURRENT vol regime, but the pool is only 20 numbers, so
+#          horizon day 1 can land on just 20 distinct prices. The near cone comes
+#          out lumpy (measured on KC: a 7.3-signal-pt empty gap sitting inside the
+#          shaded 10-90 band) and its shape is an accident of which 20 days are in
+#          the window. Backtested on KC over 29 run dates, the 10-90 band contained
+#          the realised signal only 70.7% of the time vs the 80% it advertises.
+#   60d  — 3x the observations, so a smoother near cone, and it still holds shocks
+#          that have rolled out of the 20d window (on KC as of 2026-09-10, 60d vol
+#          was 3.91%/day vs 2.65% for 20d) — in practice the wider of the two.
+#
+# A 250d pool was also tested and backtested best (77.2% coverage vs 70.7% for
+# 20d, empty gap 7.3 -> 3.5pts), but was dropped in favour of 60d to keep the
+# cone responsive to the current vol regime. 60d's own coverage is unmeasured —
+# rerun the coverage backtest before treating it as calibrated.
+#
+# Residual caveat: even with a continuous return distribution the day 1-3 cone
+# keeps a ~3.5pt gap, because the composite averages 144 indicators that each
+# snap between +1/-1 — it genuinely cannot take every value that soon. That is a
+# property of the signal, not of the sampling.
+MC_LOOKBACKS = [20, 60]
 
 def compute_monte_carlo_bands(price_df: pd.DataFrame, n_paths: int = MC_N_PATHS,
-                              horizon: int = 10, seed: int = 42, progress_cb=None) -> pd.DataFrame:
+                              horizon: int = 10, seed: int = 42, progress_cb=None,
+                              lookback: int = None) -> pd.DataFrame:
     """progress_cb(fraction, stage_name): passed straight through to
-    calculate_indicators_multi() — see its docstring."""
+    calculate_indicators_multi() — see its docstring.
+
+    lookback: trading days of returns the bootstrap draws from; defaults to
+    MC_LOOKBACK_DAYS. See MC_LOOKBACKS for why both 20 and 250 are produced."""
+    if lookback is None:
+        lookback = MC_LOOKBACK_DAYS
     base = price_df['CLOSE'].tail(1500).copy()
     if len(base) < 300:
         return pd.DataFrame()
-    hist_returns = base.pct_change().dropna().tail(MC_LOOKBACK_DAYS).to_numpy()
+    hist_returns = base.pct_change().dropna().tail(lookback).to_numpy()
     if len(hist_returns) < 10:
         return pd.DataFrame()
 
@@ -1167,12 +1210,15 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
                 except Exception as e:
                     print(f'  [{inst.short}/GSCI] today\'s simulation error: {e}')
 
-                try:
-                    mc_bands = compute_monte_carlo_bands(price_df, n_paths=MC_N_PATHS)
-                    upsert_mc_bands(inst, mc_bands, source='GSCI')
-                    print(f'  [{inst.short}/GSCI] Monte Carlo bands saved ({MC_N_PATHS} paths)')
-                except Exception as e:
-                    print(f'  [{inst.short}/GSCI] Monte Carlo error: {e}')
+                for _lb in MC_LOOKBACKS:
+                    try:
+                        mc_bands = compute_monte_carlo_bands(price_df, n_paths=MC_N_PATHS,
+                                                             lookback=_lb)
+                        upsert_mc_bands(inst, mc_bands, source='GSCI', lookback=_lb)
+                        print(f'  [{inst.short}/GSCI] Monte Carlo bands saved '
+                              f'({MC_N_PATHS} paths, {_lb}d pool)')
+                    except Exception as e:
+                        print(f'  [{inst.short}/GSCI] Monte Carlo error ({_lb}d): {e}')
             else:
                 print(f'  [{inst.short}] no GSCI sub-index — Rollex-only instrument')
 
@@ -1201,12 +1247,15 @@ def main(full_refresh: bool = False, reset_sim: bool = False) -> None:
                     except Exception as e:
                         print(f'  [{inst.short}/Rollex] today\'s simulation error: {e}')
 
-                    try:
-                        rollex_mc_bands = compute_monte_carlo_bands(rollex_df, n_paths=MC_N_PATHS)
-                        upsert_mc_bands(inst, rollex_mc_bands, source='Rollex')
-                        print(f'  [{inst.short}/Rollex] Monte Carlo bands saved ({MC_N_PATHS} paths)')
-                    except Exception as e:
-                        print(f'  [{inst.short}/Rollex] Monte Carlo error: {e}')
+                    for _lb in MC_LOOKBACKS:
+                        try:
+                            rollex_mc_bands = compute_monte_carlo_bands(
+                                rollex_df, n_paths=MC_N_PATHS, lookback=_lb)
+                            upsert_mc_bands(inst, rollex_mc_bands, source='Rollex', lookback=_lb)
+                            print(f'  [{inst.short}/Rollex] Monte Carlo bands saved '
+                                  f'({MC_N_PATHS} paths, {_lb}d pool)')
+                        except Exception as e:
+                            print(f'  [{inst.short}/Rollex] Monte Carlo error ({_lb}d): {e}')
 
     finally:
         if LSEG_AVAILABLE:
