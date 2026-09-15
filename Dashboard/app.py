@@ -199,10 +199,12 @@ def latest_active_label(labels: pd.DataFrame) -> str | None:
 
 def fmt_price(short: str, val: float) -> str:
     # Fixed 1 decimal everywhere — was per-instrument (PRICE_DECIMALS: 0/1/2),
-    # now a single consistent precision across the whole dashboard.
+    # now a single consistent precision across the whole dashboard. SB gets
+    # 2 decimals since it trades in cents/lb.
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return 'n/a'
-    return f'{val:,.1f}'
+    decimals = 2 if short == 'SB' else 1
+    return f'{val:,.{decimals}f}'
 
 
 def section_header(title: str, subtitle: str = '') -> str:
